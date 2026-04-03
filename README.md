@@ -1,48 +1,81 @@
-# ADA Vision
+# ADA Vision Platform
 
-**Smart Accessibility Compliance Scanner**
+Professional React + Firebase web platform for ADA inspection workflows:
+- Google sign-in and email/password auth
+- Separate `login.html` and `signup.html` entry pages
+- Themed dashboard (matching the style you requested)
+- Door width and ramp slope compliance checks
+- Bluetooth connect action for hardware integration
+- Inspection logging, raw report generation, and plain-English summary
 
----
+## 1) What you need to install
 
-## Overview
-**ADA Vision** is a handheld smart system that measures ADA compliance for physical spaces. It automatically detects ramp slope and doorway width, generates a detailed inspection report, and uses AI to summarize it in clear, actionable English.
+### Required
+1. **Node.js LTS (v20+)**
+   - Download: [https://nodejs.org](https://nodejs.org)
+   - Verify after install:
+     - `node -v`
+     - `npm -v`
 
----
+2. **Firebase project (console setup)**
+   - Open [https://console.firebase.google.com](https://console.firebase.google.com)
+   - Create project (or use existing)
+   - Add **Web App**
+   - Copy Firebase web config values
 
-## Features
-- Measure **ramp slope** using MPU6050 IMU  
-- Measure **door width** using ultrasonic sensor  
-- **Wireless data transfer** to laptop via Bluetooth  
-- **Auto-generated inspection report**  
-- **AI-powered plain-English summary** of the report  
+### Optional but recommended
+- **Git**: [https://git-scm.com/downloads](https://git-scm.com/downloads)
+- **VS Code / Cursor**
 
----
+## 2) Firebase setup
 
-## How It Works
-1. Sensors collect measurements from ramps and doors.  
-2. Arduino/ESP32 processes data and sends it to a laptop via Bluetooth.  
-3. Laptop generates a long, official-style report.  
-4. AI summarizes the report into easy-to-understand English.  
-5. Results are displayed on a web dashboard for inspection review and report download.
+In Firebase Console:
+1. Go to **Authentication** -> **Sign-in method**
+2. Enable:
+   - **Email/Password**
+   - **Google**
+3. Under Project Settings -> General -> Your apps -> Web app config, copy:
+   - `apiKey`
+   - `authDomain`
+   - `projectId`
+   - `storageBucket`
+   - `messagingSenderId`
+   - `appId`
 
----
+Paste these into `src/firebase.js`.
 
-## Demo Flow
-1. Tilt device on a ramp → displays pass/fail  
-2. Measure doorway width → displays pass/fail  
-3. Generate full report → see AI summary in plain English  
+## 3) Install and run
 
----
+From project root:
 
-## Target Users
-- Government inspectors  
-- Contractors  
-- Accessibility auditors  
+```bash
+npm install
+npm run dev
+```
 
----
+Then open:
+- Login page: `http://localhost:5173/login.html`
+- Sign up page: `http://localhost:5173/signup.html`
+- Dashboard: `http://localhost:5173/index.html`
 
-## Tech Stack
-- **Hardware:** Arduino / ESP32, MPU6050 IMU, Ultrasonic sensor, Bluetooth module  
-- **Software:** Python/React for web dashboard, OpenAI/Gemini API for AI report summary  
+## 4) Hardware integration notes (Bluetooth)
 
----
+- Dashboard includes a **Connect Bluetooth** button using Web Bluetooth API.
+- Browser support is best in Chrome/Edge.
+- Your ESP32/Arduino can send payloads (JSON or delimited string).  
+- Current app supports manual value entry plus Bluetooth device selection; parsing live stream is the next step once your firmware payload format is finalized.
+
+## 5) ADA logic implemented
+
+- Door width compliance: `>= 32 in`
+- Ramp slope from IMU angle:
+  - `slopeRatio = 1 / tan(theta)`
+  - Compliant when `slopeRatio >= 12` (meets `1:12` maximum slope rule)
+
+## 6) Suggested next upgrade
+
+When your hardware payload is ready, add a parser in `src/App.jsx` to:
+1. Read BLE characteristic notifications
+2. Parse values (e.g. `doorWidth`, `rampAngle`)
+3. Update dashboard state in real time
+4. Auto-log each inspection snapshot
