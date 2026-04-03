@@ -1,88 +1,43 @@
-# ADA Vision
-
-**Smart Accessibility Compliance Scanner**
-
----
+# ADA Vision — Smart Compliance Scanner
 
 ## Overview
-**ADA Vision** is a handheld smart system that measures ADA compliance for physical spaces. It automatically detects ramp slope and doorway width, generates a detailed inspection report, and uses AI to summarize it in clear, actionable English.
+**ADA Vision** is a hackathon project designed to make ADA compliance inspections faster, easier, and more consistent. The system uses sensors to measure ramp slope and door width, then sends the data to a laptop via Bluetooth. The website parses the data, generates a report, and can even summarize it using AI.
 
 ---
 
 ## Features
-- Measure **ramp slope** using MPU6050 IMU  
-- Measure **door width** using ultrasonic sensor  
-- **Wireless data transfer** to laptop via Bluetooth  
-- **Auto-generated inspection report**  
-- **AI-powered plain-English summary** of the report  
 
----
+### Target (MVP) Features
+- Hardware sensor readings:
+  - Ramp slope using IMU
+  - Door width using ultrasonic/laser distance sensors
+- Bluetooth data transmission from Arduino/ESP32 to laptop
+- Basic web dashboard to view live measurements
+- Reports tab to compile measurements into raw reports
 
-## How It Works
-1. Sensors collect measurements from ramps and doors.  
-2. Arduino/ESP32 processes data and sends it to a laptop via Bluetooth.  
-3. Laptop generates a long, official-style report.  
-4. AI summarizes the report into easy-to-understand English.  
-5. Results are displayed on a web dashboard for inspection review and report download.
+### AI Feature
+- AI module summarizes raw reports into **plain English** for easier understanding
 
----
-
-## Demo Flow
-1. Tilt device on a ramp → displays pass/fail  
-2. Measure doorway width → displays pass/fail  
-3. Generate full report → see AI summary in plain English  
-
----
-
-## Target Users
-- Government inspectors  
-- Contractors  
-- Accessibility auditors  
+### Future/Stretch Features
+- Store reports and user settings in Firebase database
+- Multi-user support with Firebase Authentication
+- Export reports as PDF or CSV
+- Historical trends and compliance analytics
 
 ---
 
 ## Tech Stack
-- **Hardware:** Arduino / ESP32, MPU6050 IMU, Ultrasonic sensor, Bluetooth module  
-- **Software:** Python, HTML/CSS/JS for web dashboard, OpenAI/Gemini API for AI report summary  
+- **Hardware:** Arduino / ESP32, HC-05 Bluetooth, IMU sensor, Ultrasonic / Laser sensor  
+- **Software:** Web dashboard (React), AI summary (OpenAI), Firebase Auth & Firestore  
+- **Collaboration:** Cursor for live coding
 
-<<<<<<< HEAD
 ---
-=======
-### Optional OpenAI summary setup
 
-Inside `web/`, create `.env.local` and add:
+## Usage
+1. Arduino reads sensor data and sends it via Bluetooth  
+2. Laptop receives data and displays it on the website (Overview tab)  
+3. Reports tab compiles measurements and AI summarizes the report  
+4. Users can log in via Google sign-in (Firebase Auth)  
+5. Future: Save and retrieve reports from Firebase Firestore
 
-```bash
-VITE_OPENAI_API_KEY=your_openai_key_here
-VITE_OPENAI_MODEL=gpt-4.1-mini
-```
-
-If the key is missing or invalid, the app automatically falls back to local summary logic.
-
-Then open:
-- Login page: `http://localhost:5173/login.html`
-- Sign up page: `http://localhost:5173/signup.html`
-- Dashboard: `http://localhost:5173/index.html`
-
-## 4) Hardware integration notes (Bluetooth)
-
-- Dashboard includes a **Connect Bluetooth** button using Web Bluetooth API.
-- Browser support is best in Chrome/Edge.
-- Your ESP32/Arduino can send payloads (JSON or delimited string).  
-- Current app supports manual value entry plus Bluetooth device selection; parsing live stream is the next step once your firmware payload format is finalized.
-
-## 5) ADA logic implemented
-
-- Door width compliance: `>= 32 in`
-- Ramp slope from IMU angle:
-  - `slopeRatio = 1 / tan(theta)`
-  - Compliant when `slopeRatio >= 12` (meets `1:12` maximum slope rule)
-
-## 6) Suggested next upgrade
-
-When your hardware payload is ready, add a parser in `web/src/App.jsx` to:
-1. Read BLE characteristic notifications
-2. Parse values (e.g. `doorWidth`, `rampAngle`)
-3. Update dashboard state in real time
-4. Auto-log each inspection snapshot
->>>>>>> 64391f2 (Update dashboard tabs and AI summary integration)
+---
