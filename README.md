@@ -2,7 +2,7 @@
 
 ## Repository structure
 
-- `hardware/ADA/` -> microcontroller code and sensor logic
+- `ADA/` -> microcontroller code and sensor logic
 - `web/` -> React + Firebase dashboard application
 - `docs/` -> design/support documentation
 
