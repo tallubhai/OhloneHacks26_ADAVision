@@ -45,4 +45,44 @@
 - **Hardware:** Arduino / ESP32, MPU6050 IMU, Ultrasonic sensor, Bluetooth module  
 - **Software:** Python, HTML/CSS/JS for web dashboard, OpenAI/Gemini API for AI report summary  
 
+<<<<<<< HEAD
 ---
+=======
+### Optional OpenAI summary setup
+
+Inside `web/`, create `.env.local` and add:
+
+```bash
+VITE_OPENAI_API_KEY=your_openai_key_here
+VITE_OPENAI_MODEL=gpt-4.1-mini
+```
+
+If the key is missing or invalid, the app automatically falls back to local summary logic.
+
+Then open:
+- Login page: `http://localhost:5173/login.html`
+- Sign up page: `http://localhost:5173/signup.html`
+- Dashboard: `http://localhost:5173/index.html`
+
+## 4) Hardware integration notes (Bluetooth)
+
+- Dashboard includes a **Connect Bluetooth** button using Web Bluetooth API.
+- Browser support is best in Chrome/Edge.
+- Your ESP32/Arduino can send payloads (JSON or delimited string).  
+- Current app supports manual value entry plus Bluetooth device selection; parsing live stream is the next step once your firmware payload format is finalized.
+
+## 5) ADA logic implemented
+
+- Door width compliance: `>= 32 in`
+- Ramp slope from IMU angle:
+  - `slopeRatio = 1 / tan(theta)`
+  - Compliant when `slopeRatio >= 12` (meets `1:12` maximum slope rule)
+
+## 6) Suggested next upgrade
+
+When your hardware payload is ready, add a parser in `web/src/App.jsx` to:
+1. Read BLE characteristic notifications
+2. Parse values (e.g. `doorWidth`, `rampAngle`)
+3. Update dashboard state in real time
+4. Auto-log each inspection snapshot
+>>>>>>> 64391f2 (Update dashboard tabs and AI summary integration)
