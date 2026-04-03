@@ -89,7 +89,8 @@ a:hover {
   font-size: 0.88rem;
 }
 
-.input-label input {
+.input-label input,
+.input-label select {
   border: 1px solid #d9e0f3;
   border-radius: 10px;
   height: 42px;
@@ -98,7 +99,8 @@ a:hover {
   background: #fff;
 }
 
-.input-label input:focus {
+.input-label input:focus,
+.input-label select:focus {
   outline: 2px solid #dbe4ff;
   border-color: #7090ff;
 }
@@ -357,6 +359,10 @@ a:hover {
   color: #d1344f;
 }
 
+.warn {
+  color: #b86a08;
+}
+
 .row {
   display: flex;
   gap: 8px;
@@ -435,4 +441,58 @@ a:hover {
     border-right: none;
     border-bottom: 1px solid #e6ebf7;
   }
+}
+
+body.theme-dark {
+  background: #111827;
+  color: #e7ecfa;
+}
+
+body.theme-dark .sidebar,
+body.theme-dark .topbar,
+body.theme-dark .panel,
+body.theme-dark .stat-card {
+  background: #1b2436;
+  border-color: #2c3955;
+  color: #e7ecfa;
+}
+
+body.theme-dark .stat-title,
+body.theme-dark .stat-meta,
+body.theme-dark .panel p,
+body.theme-dark .sidebar-brand p {
+  color: #b8c3de;
+}
+
+body.theme-dark .menu-item {
+  color: #dbe5ff;
+}
+
+body.theme-dark .menu-item:hover {
+  background: #283758;
+}
+
+body.theme-dark .menu-item.active {
+  background: #3f62e2;
+}
+
+body.theme-dark .row input,
+body.theme-dark .row textarea,
+body.theme-dark .input-label input,
+body.theme-dark .input-label select {
+  background: #101726;
+  color: #edf2ff;
+  border-color: #33405c;
+}
+
+body.theme-dark .btn-outline {
+  background: #1a2336;
+  color: #d8e2fb;
+  border-color: #364667;
+}
+
+body.theme-dark .summary-box,
+body.theme-dark .metric-box {
+  background: #131c2d;
+  border-color: #334260;
 }
