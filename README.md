@@ -1,5 +1,11 @@
 # ADA Vision Platform
 
+## Repository structure
+
+- `hardware/ADA/` -> microcontroller code and sensor logic
+- `web/` -> React + Firebase dashboard application
+- `docs/` -> design/support documentation
+
 Professional React + Firebase web platform for ADA inspection workflows:
 - Google sign-in and email/password auth
 - Separate `login.html` and `signup.html` entry pages
@@ -42,13 +48,14 @@ In Firebase Console:
    - `messagingSenderId`
    - `appId`
 
-Paste these into `src/firebase.js`.
+Paste these into `web/src/firebase.js`.
 
 ## 3) Install and run
 
-From project root:
+From the web app folder:
 
 ```bash
+cd web
 npm install
 npm run dev
 ```
@@ -74,7 +81,7 @@ Then open:
 
 ## 6) Suggested next upgrade
 
-When your hardware payload is ready, add a parser in `src/App.jsx` to:
+When your hardware payload is ready, add a parser in `web/src/App.jsx` to:
 1. Read BLE characteristic notifications
 2. Parse values (e.g. `doorWidth`, `rampAngle`)
 3. Update dashboard state in real time
