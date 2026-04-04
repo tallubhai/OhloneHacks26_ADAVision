@@ -50,12 +50,13 @@ void loop() {
     
     digitalWrite(redLED, LOW);
     digitalWrite(greenLED, HIGH);
-    float dist;
+    float dist = 0;
     float total = 0;
     //get average over 3 seconds
     for(int i= 0; i<15; i++){
       dist = distance.readDistance();
       total += dist;
+      //bt.send(String(dist, 2)); //debug line
       delay(200);
     }
     digitalWrite(greenLED, LOW);
@@ -71,11 +72,12 @@ void loop() {
     
     digitalWrite(redLED, LOW);
     digitalWrite(greenLED, HIGH);
-    float dist;
+    float dist = 0;
     float total = 0;
     for(int i= 0; i<15; i++){
       dist = distance.readDistance();
       total += dist;
+       //bt.send(String(dist, 2)); //debug line
        delay(200);
     }
     digitalWrite(greenLED, LOW);
@@ -91,7 +93,7 @@ void loop() {
     
     digitalWrite(redLED, LOW);
     digitalWrite(greenLED, HIGH);
-    float ang;
+    float ang = 0;
     float total = 0;
     for(int i= 0; i<15; i++){
       imu.readAngles(pitch, roll, yaw, angleFromLevel);
@@ -111,11 +113,12 @@ void loop() {
     
     digitalWrite(redLED, LOW);
     digitalWrite(greenLED, HIGH);
-    float dist;
+    float dist = 0;
     float total = 0;
     for(int i= 0; i<15; i++){
       dist = distance.readDistance();
       total += dist;
+       //bt.send(String(dist, 2)); //debug line
        delay(200);
     }
     digitalWrite(greenLED, LOW);
