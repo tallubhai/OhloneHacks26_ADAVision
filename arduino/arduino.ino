@@ -2,8 +2,8 @@
 #include "distance.h"
 #include "bt.h"
 
-#define TRIG_PIN 7
-#define ECHO_PIN 6
+#define TRIG_PIN 9
+#define ECHO_PIN 10
 
 IMU imu;
 Distance distance(TRIG_PIN, ECHO_PIN);
@@ -23,13 +23,10 @@ void loop() {
 
   float dist = distance.readDistance();
 
-  String output = "Pitch: " + String(pitch, 2) +
-                  " | Roll: " + String(roll, 2) +
-                  " | Yaw: " + String(yaw, 2) +
-                  " | AngleFromLevel: " + String(angleFromLevel, 2) +
+  String output = "AngleFromLevel: " + String(angleFromLevel, 2) +
                   " | Distance: " + String(dist, 2) + " cm";
 
   bt.send(output);
 
-  delay(50);
+  delay(200);
 }
