@@ -13,6 +13,7 @@ const int pathWidth = 5;
 
 const int redLED = 6;
 const int greenLED = 7;
+const int blueLED = 8;
 
 
 IMU imu;
@@ -30,6 +31,7 @@ void setup() {
   pinMode(pathWidth, INPUT_PULLUP); 
   pinMode(redLED, OUTPUT);
   pinMode(greenLED, OUTPUT);
+  pinMode(blueLED, OUTPUT);
 }
 
 void loop() {
@@ -37,92 +39,88 @@ void loop() {
   imu.readAngles(pitch, roll, yaw, angleFromLevel);
 
   // float dist = distance.readDistance();
-
   // String output = "*" + String(angleFromLevel, 2) + "|" + String(dist, 2);
-
   // bt.send(output);
-
   // delay(250);
 
+//measure door width
   if (digitalRead(doorWidthButton) == LOW) {
     digitalWrite(redLED, HIGH);
-    delay(1000);
+    delay(2000);
     
     digitalWrite(redLED, LOW);
     digitalWrite(greenLED, HIGH);
-    float dist[15];
+    float dist;
     float total = 0;
-    for(int i= 0; i<=15; i++){
-      dist[i] = distance.readDistance();
-      total += dist[i];
+    //get average over 3 seconds
+    for(int i= 0; i<15; i++){
+      dist = distance.readDistance();
+      total += dist;
+      delay(200);
     }
+    digitalWrite(greenLED, LOW);
     float avgDist = total / 15;
     bt.send( "|" + String(avgDist, 2));
 
-  } else {
-    digitalWrite(redLED, LOW);   
-    digitalWrite(greenLED, LOW);
   }
 
+//measure door height
   if (digitalRead(doorHeightButton) == LOW) {
     digitalWrite(redLED, HIGH);
-    delay(1000);
+    delay(2000);
     
     digitalWrite(redLED, LOW);
     digitalWrite(greenLED, HIGH);
-    float dist[15];
+    float dist;
     float total = 0;
-    for(int i= 0; i<=15; i++){
-      dist[i] = distance.readDistance();
-      total += dist[i];
+    for(int i= 0; i<15; i++){
+      dist = distance.readDistance();
+      total += dist;
+       delay(200);
     }
+    digitalWrite(greenLED, LOW);
     float avgDist = total / 15;
     bt.send( "*" + String(avgDist, 2));
 
-  } else {
-    digitalWrite(redLED, LOW);   
-    digitalWrite(greenLED, LOW);
   }
 
+//measure ramp angle
   if (digitalRead(rampButton) == LOW) {
     digitalWrite(redLED, HIGH);
-    delay(1000);
+    delay(2000);
     
     digitalWrite(redLED, LOW);
     digitalWrite(greenLED, HIGH);
-    float ang[15];
+    float ang;
     float total = 0;
-    for(int i= 0; i<=15; i++){
+    for(int i= 0; i<15; i++){
       imu.readAngles(pitch, roll, yaw, angleFromLevel);
-      ang[i] = angleFromLevel;
-      total += ang[i];
+      ang = angleFromLevel;
+      total += ang;
+       delay(200);
     }
+    digitalWrite(greenLED, LOW);
     float avgAng = total / 15;
     bt.send( "~" + String(avgAng, 2));
-
-  } else {
-    digitalWrite(redLED, LOW);   
-    digitalWrite(greenLED, LOW);
   }
 
+//measure path width
   if (digitalRead(pathWidth) == LOW) {
     digitalWrite(redLED, HIGH);
-    delay(1000);
+    delay(2000);
     
     digitalWrite(redLED, LOW);
     digitalWrite(greenLED, HIGH);
-    float dist[15];
+    float dist;
     float total = 0;
-    for(int i= 0; i<=15; i++){
-      dist[i] = distance.readDistance();
-      total += dist[i];
+    for(int i= 0; i<15; i++){
+      dist = distance.readDistance();
+      total += dist;
+       delay(200);
     }
+    digitalWrite(greenLED, LOW);
     float avgDist = total / 15;
     bt.send( "$" + String(avgDist, 2));
 
-  } else {
-    digitalWrite(redLED, LOW);   
-    digitalWrite(greenLED, LOW);
   }
-
 }
