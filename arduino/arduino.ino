@@ -12,8 +12,7 @@ const int rampButton = 4;
 const int pathWidth = 5;
 
 const int redLED = 6;
-const int yellowLED = 7;
-const int greenLED = 8;
+const int greenLED = 7;
 
 
 IMU imu;
