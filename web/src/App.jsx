@@ -497,6 +497,57 @@ function parseSingleCheckExplanation(aiText) {
   return firstLine;
 }
 
+function toFiniteNumberOrNull(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" && value.trim() === "") return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function getMeasurementLabel(type) {
+  const normalized = String(type || "").toLowerCase();
+  if (normalized === "ramp_angle") return "Ramp Angle";
+  if (normalized === "door_width") return "Door Width";
+  if (normalized === "door_height") return "Door Height";
+  if (normalized === "pathway_width") return "Pathway Width";
+  if (normalized === "combined") return "Ramp + Door Width";
+  return "Measurement";
+}
+
+function buildProjectSummaries(readings) {
+  const grouped = new Map();
+  readings
+    .filter((entry) => entry?.projectId && entry?.projectName)
+    .sort((a, b) => Number(a.id) - Number(b.id))
+    .forEach((entry) => {
+      const id = String(entry.projectId);
+      const current = grouped.get(id) || {
+        id,
+        name: String(entry.projectName),
+        rampAngle: null,
+        doorWidth: null,
+        doorHeight: null,
+        pathwayWidth: null,
+        updatedAt: entry.timestamp || "Unknown time",
+        updatedId: Number(entry.id) || 0,
+        updateCount: 0
+      };
+      const rampAngle = toFiniteNumberOrNull(entry.rampAngle);
+      const doorWidth = toFiniteNumberOrNull(entry.doorWidth);
+      const doorHeight = toFiniteNumberOrNull(entry.doorHeight);
+      const pathwayWidth = toFiniteNumberOrNull(entry.pathwayWidth);
+      if (rampAngle != null) current.rampAngle = rampAngle;
+      if (doorWidth != null) current.doorWidth = doorWidth;
+      if (doorHeight != null) current.doorHeight = doorHeight;
+      if (pathwayWidth != null) current.pathwayWidth = pathwayWidth;
+      current.updatedAt = entry.timestamp || current.updatedAt;
+      current.updatedId = Number(entry.id) || current.updatedId;
+      current.updateCount += 1;
+      grouped.set(id, current);
+    });
+  return Array.from(grouped.values()).sort((a, b) => Number(b.updatedId) - Number(a.updatedId));
+}
+
 function generateWebsiteFallbackReport(scanResult) {
   const violations = scanResult?.violations || [];
   const counts = scanResult?.counts || {};
@@ -630,6 +681,11 @@ export default function App() {
   const [importError, setImportError] = useState("");
   const [importSuccess, setImportSuccess] = useState("");
   const [importedReadings, setImportedReadings] = useState([]);
+  const [pendingSensorReading, setPendingSensorReading] = useState(null);
+  const [incomingProjectMode, setIncomingProjectMode] = useState("existing");
+  const [incomingProjectId, setIncomingProjectId] = useState("");
+  const [incomingProjectName, setIncomingProjectName] = useState("");
+  const [incomingProjectMessage, setIncomingProjectMessage] = useState("");
   const [websiteUrl, setWebsiteUrl] = useState("https://example.com");
   const [websiteScanLoading, setWebsiteScanLoading] = useState(false);
   const [websiteScanError, setWebsiteScanError] = useState("");
@@ -652,6 +708,7 @@ export default function App() {
   const cloudStateLoadedRef = useRef(false);
   /** Dedupes Bluetooth ingest: same `reading.id` from `/api/sensors/latest` is applied once. */
   const lastSensorReadingIdRef = useRef(null);
+  const buildingProjects = buildProjectSummaries(importedReadings);
 
   /**
    * Measurements fed into report + AI: prefer `logs` and `importedReadings` (includes BT bridge),
@@ -678,6 +735,13 @@ export default function App() {
         pathwayWidth: Number.isFinite(Number(entry.pathwayWidth)) ? Number(entry.pathwayWidth) : null
       }))
     ]
+      .filter(
+        (entry) =>
+          Number.isFinite(Number(entry.doorWidth)) &&
+          Number.isFinite(Number(entry.rampAngle)) &&
+          Number(entry.doorWidth) > 0 &&
+          Number(entry.rampAngle) > 0
+      )
       .sort((a, b) => Number(b.id) - Number(a.id))
       .slice(0, 20);
 
@@ -800,30 +864,40 @@ export default function App() {
         const reading = payload?.reading;
         if (!reading || !reading.id) return;
         if (lastSensorReadingIdRef.current === reading.id) return;
-        if (!Number.isFinite(Number(reading.rampAngle)) || !Number.isFinite(Number(reading.doorWidth))) return;
+        const rampAngleValue = toFiniteNumberOrNull(reading.rampAngle);
+        const doorWidthValue = toFiniteNumberOrNull(reading.doorWidth);
+        const doorHeightValue = toFiniteNumberOrNull(reading.doorHeight);
+        const pathwayWidthValue = toFiniteNumberOrNull(reading.pathwayWidth);
+        if (
+          rampAngleValue == null &&
+          doorWidthValue == null &&
+          doorHeightValue == null &&
+          pathwayWidthValue == null
+        ) {
+          return;
+        }
 
         lastSensorReadingIdRef.current = reading.id;
         if (cancelled) return;
 
-        const rampAngleValue = Number(reading.rampAngle);
-        const doorWidthValue = Number(reading.doorWidth);
-        // Treat bridge data like an import row so it flows through the same report pipeline.
-        const importedEntry = {
-          id: Date.now(),
+        const incoming = {
+          id: Number(reading.id),
           timestamp: new Date(reading.receivedAt || Date.now()).toLocaleString(),
-          format: "BT Bridge",
-          sourceType: "ramp_angle",
-          doorWidth: Number(doorWidthValue.toFixed(2)),
-          rampAngle: Number(rampAngleValue.toFixed(2)),
-          doorHeight: null,
-          pathwayWidth: null,
-          slopeRatio: Number(calculateSlopeRatio(rampAngleValue).toFixed(2))
+          source: String(reading.source || "BT Bridge"),
+          raw: String(reading.raw || ""),
+          measurementType: String(reading.measurementType || "unknown"),
+          rampAngle: rampAngleValue,
+          doorWidth: doorWidthValue,
+          doorHeight: doorHeightValue,
+          pathwayWidth: pathwayWidthValue
         };
-
-        setImportedReadings((prev) => [importedEntry, ...prev].slice(0, 30));
-        setDoorWidth(importedEntry.doorWidth);
-        setRampAngle(importedEntry.rampAngle);
-        setLastRefreshedAt(importedEntry.timestamp);
+        setPendingSensorReading(incoming);
+        setIncomingProjectMessage("");
+        setIncomingProjectName("");
+        if (!incomingProjectId) {
+          setIncomingProjectMode("new");
+        }
+        setLastRefreshedAt(incoming.timestamp);
       } catch (_error) {
         // No backend / CORS / network: keep UI usable with manual or cached values.
       }
@@ -835,7 +909,7 @@ export default function App() {
       cancelled = true;
       clearInterval(intervalId);
     };
-  }, []);
+  }, [incomingProjectId]);
 
   useEffect(() => {
     cloudStateLoadedRef.current = false;
@@ -891,6 +965,20 @@ export default function App() {
     minPathwayWidth,
     themeMode
   ]);
+
+  useEffect(() => {
+    if (!pendingSensorReading) return;
+    if (incomingProjectMode === "existing") {
+      if (buildingProjects.length === 0) {
+        setIncomingProjectMode("new");
+        setIncomingProjectId("");
+        return;
+      }
+      if (!incomingProjectId || !buildingProjects.some((project) => project.id === incomingProjectId)) {
+        setIncomingProjectId(buildingProjects[0].id);
+      }
+    }
+  }, [pendingSensorReading, incomingProjectMode, incomingProjectId, buildingProjects]);
 
   function normalizeNumber(value, fallbackValue) {
     const numeric = Number(value);
@@ -1286,14 +1374,101 @@ export default function App() {
     }
   }
 
+  function dismissIncomingMeasurement() {
+    setPendingSensorReading(null);
+    setIncomingProjectMessage("");
+  }
+
+  function applyIncomingMeasurementToProject() {
+    if (!pendingSensorReading) {
+      setIncomingProjectMessage("No incoming hardware data to apply.");
+      return;
+    }
+
+    let projectId = "";
+    let projectName = "";
+    if (incomingProjectMode === "new") {
+      const cleanName = String(incomingProjectName || "").trim();
+      if (!cleanName) {
+        setIncomingProjectMessage("Enter a project name first.");
+        return;
+      }
+      projectId = `project-${Date.now()}`;
+      projectName = cleanName;
+    } else {
+      const existing = buildingProjects.find((project) => project.id === incomingProjectId);
+      if (!existing) {
+        setIncomingProjectMessage("Select an existing project.");
+        return;
+      }
+      projectId = existing.id;
+      projectName = existing.name;
+    }
+
+    const existingProject = buildingProjects.find((project) => project.id === projectId);
+    const beforeRampAngle = toFiniteNumberOrNull(existingProject?.rampAngle);
+    const beforeDoorWidth = toFiniteNumberOrNull(existingProject?.doorWidth);
+    const beforeDoorHeight = toFiniteNumberOrNull(existingProject?.doorHeight);
+    const beforePathwayWidth = toFiniteNumberOrNull(existingProject?.pathwayWidth);
+    const mergedRampAngle =
+      toFiniteNumberOrNull(pendingSensorReading.rampAngle) ??
+      toFiniteNumberOrNull(existingProject?.rampAngle);
+    const mergedDoorWidth =
+      toFiniteNumberOrNull(pendingSensorReading.doorWidth) ??
+      toFiniteNumberOrNull(existingProject?.doorWidth);
+    const mergedDoorHeight =
+      toFiniteNumberOrNull(pendingSensorReading.doorHeight) ??
+      toFiniteNumberOrNull(existingProject?.doorHeight);
+    const mergedPathwayWidth =
+      toFiniteNumberOrNull(pendingSensorReading.pathwayWidth) ??
+      toFiniteNumberOrNull(existingProject?.pathwayWidth);
+
+    const importedEntry = {
+      id: Date.now(),
+      timestamp: pendingSensorReading.timestamp || new Date().toLocaleString(),
+      format: "BT Bridge",
+      sourceType: pendingSensorReading.measurementType || "bridge",
+      measurementType: pendingSensorReading.measurementType || "unknown",
+      projectId,
+      projectName,
+      doorWidth: mergedDoorWidth,
+      rampAngle: mergedRampAngle,
+      doorHeight: mergedDoorHeight,
+      pathwayWidth: mergedPathwayWidth,
+      slopeRatio:
+        mergedRampAngle != null ? Number(calculateSlopeRatio(mergedRampAngle).toFixed(2)) : null
+    };
+
+    setImportedReadings((prev) => [importedEntry, ...prev].slice(0, 30));
+    if (mergedDoorWidth != null) setDoorWidth(Number(mergedDoorWidth.toFixed(2)));
+    if (mergedRampAngle != null) setRampAngle(Number(mergedRampAngle.toFixed(2)));
+    setIncomingProjectId(projectId);
+    setIncomingProjectName("");
+    setIncomingProjectMode("existing");
+    setPendingSensorReading(null);
+    const updatedFields = [];
+    if (beforeRampAngle !== mergedRampAngle) updatedFields.push("Ramp Angle");
+    if (beforeDoorWidth !== mergedDoorWidth) updatedFields.push("Door Width");
+    if (beforeDoorHeight !== mergedDoorHeight) updatedFields.push("Door Height");
+    if (beforePathwayWidth !== mergedPathwayWidth) updatedFields.push("Pathway Width");
+    const updatedLabel = updatedFields.length > 0 ? updatedFields.join(", ") : "No value changes";
+    setIncomingProjectMessage(
+      `Saved ${getMeasurementLabel(importedEntry.measurementType)} to "${projectName}". Updated: ${updatedLabel}.`
+    );
+  }
+
   function useLatestImportedReading() {
-    if (importedReadings.length === 0) {
-      setImportError("No imported readings available yet.");
+    const latest = importedReadings.find(
+      (entry) =>
+        Number.isFinite(Number(entry.doorWidth)) &&
+        Number.isFinite(Number(entry.rampAngle))
+    );
+    if (!latest) {
+      setImportError("No complete reading found yet (need both door width and ramp angle).");
       setImportSuccess("");
       return;
     }
 
-    const latest = importedReadings[0];
     setDoorWidth(latest.doorWidth);
     setRampAngle(latest.rampAngle);
     setLastRefreshedAt(new Date().toLocaleString());
@@ -1970,8 +2145,138 @@ export default function App() {
             <article className="panel">
               <h3>Buildings</h3>
               <p>
-                Receive raw Bluetooth payloads (JSON/CSV), validate values, and store imported
-                readings for this session.
+                Hardware sends one measurement at a time (angle, door width, pathway width, or door
+                height). Assign each incoming reading to a building project to build a complete profile.
+              </p>
+
+              <div className="summary-box" style={{ marginTop: "10px" }}>
+                {pendingSensorReading ? (
+                  <>
+                    <h4 style={{ marginBottom: "8px" }}>Incoming Hardware Reading</h4>
+                    <p className="stat-meta">
+                      Received: {pendingSensorReading.timestamp} | Type:{" "}
+                      <strong>{getMeasurementLabel(pendingSensorReading.measurementType)}</strong>
+                    </p>
+                    <p style={{ marginBottom: "8px" }}>
+                      {toFiniteNumberOrNull(pendingSensorReading.rampAngle) != null
+                        ? `Ramp angle ${Number(pendingSensorReading.rampAngle).toFixed(2)} deg. `
+                        : ""}
+                      {toFiniteNumberOrNull(pendingSensorReading.doorWidth) != null
+                        ? `Door width ${Number(pendingSensorReading.doorWidth).toFixed(2)} in. `
+                        : ""}
+                      {toFiniteNumberOrNull(pendingSensorReading.pathwayWidth) != null
+                        ? `Pathway width ${Number(pendingSensorReading.pathwayWidth).toFixed(2)} in. `
+                        : ""}
+                      {toFiniteNumberOrNull(pendingSensorReading.doorHeight) != null
+                        ? `Door height ${Number(pendingSensorReading.doorHeight).toFixed(2)} in.`
+                        : ""}
+                    </p>
+
+                    <div className="row" style={{ marginBottom: "8px" }}>
+                      <label className="input-label" style={{ minWidth: "220px" }}>
+                        Save Mode
+                        <select
+                          value={incomingProjectMode}
+                          onChange={(event) => setIncomingProjectMode(event.target.value)}
+                        >
+                          <option value="existing">Add to Existing Project</option>
+                          <option value="new">Create New Project</option>
+                        </select>
+                      </label>
+
+                      {incomingProjectMode === "existing" ? (
+                        <label className="input-label" style={{ minWidth: "240px" }}>
+                          Existing Project
+                          <select
+                            value={incomingProjectId}
+                            onChange={(event) => setIncomingProjectId(event.target.value)}
+                          >
+                            <option value="">Select project</option>
+                            {buildingProjects.map((project) => (
+                              <option key={project.id} value={project.id}>
+                                {project.name}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      ) : (
+                        <label className="input-label" style={{ minWidth: "240px" }}>
+                          New Project Name
+                          <input
+                            type="text"
+                            value={incomingProjectName}
+                            onChange={(event) => setIncomingProjectName(event.target.value)}
+                            placeholder="e.g., City Hall North Ramp"
+                          />
+                        </label>
+                      )}
+                    </div>
+
+                    <div className="row">
+                      <button className="btn btn-primary" onClick={applyIncomingMeasurementToProject}>
+                        Save Reading to Project
+                      </button>
+                      <button className="btn btn-outline" onClick={dismissIncomingMeasurement}>
+                        Dismiss
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <p className="stat-meta">
+                    Waiting for hardware data from pyBridge. Press a hardware button to capture a
+                    reading, then assign it to a project here.
+                  </p>
+                )}
+              </div>
+              {incomingProjectMessage && (
+                <p className="status-success" style={{ marginTop: "10px" }}>
+                  {incomingProjectMessage}
+                </p>
+              )}
+            </article>
+
+            <article className="panel" style={{ marginTop: "10px" }}>
+              <h3>Building Projects</h3>
+              <table className="log-table">
+                <thead>
+                  <tr>
+                    <th>Project</th>
+                    <th>Ramp Angle</th>
+                    <th>Door Width</th>
+                    <th>Pathway Width</th>
+                    <th>Door Height</th>
+                    <th>Last Updated</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {buildingProjects.length === 0 ? (
+                    <tr>
+                      <td colSpan="6">No building projects yet. Save incoming readings to create one.</td>
+                    </tr>
+                  ) : (
+                    buildingProjects.map((project) => (
+                      <tr key={project.id}>
+                        <td>{project.name}</td>
+                        <td>{Number.isFinite(project.rampAngle) ? `${project.rampAngle.toFixed(2)} deg` : "N/A"}</td>
+                        <td>{Number.isFinite(project.doorWidth) ? `${project.doorWidth.toFixed(2)} in` : "N/A"}</td>
+                        <td>
+                          {Number.isFinite(project.pathwayWidth)
+                            ? `${project.pathwayWidth.toFixed(2)} in`
+                            : "N/A"}
+                        </td>
+                        <td>{Number.isFinite(project.doorHeight) ? `${project.doorHeight.toFixed(2)} in` : "N/A"}</td>
+                        <td>{project.updatedAt}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </article>
+
+            <article className="panel" style={{ marginTop: "10px" }}>
+              <h3>Manual Payload Import (Optional)</h3>
+              <p className="stat-meta">
+                Backup input for testing. Hardware flow still comes from pyBridge on localhost.
               </p>
               <div className="row">
                 <textarea
@@ -1990,16 +2295,12 @@ export default function App() {
                   {importSuccess}
                 </p>
               )}
-              <p className="stat-meta" style={{ marginTop: "10px" }}>
-                Bluetooth is handled by the Python bridge script. This website reads data from the
-                localhost bridge API only.
-              </p>
               <div className="row">
                 <button className="btn btn-primary" onClick={importMeasurementPayload}>
                   Parse & Save Reading
                 </button>
                 <button className="btn btn-outline" onClick={useLatestImportedReading}>
-                  Use Latest Imported
+                  Use Latest Complete Reading
                 </button>
               </div>
             </article>
@@ -2010,7 +2311,9 @@ export default function App() {
                 <thead>
                   <tr>
                     <th>Time</th>
+                    <th>Project</th>
                     <th>Format</th>
+                    <th>Type</th>
                     <th>Door</th>
                     <th>Ramp (deg)</th>
                     <th>Ramp Ratio (1:X)</th>
@@ -2021,16 +2324,28 @@ export default function App() {
                 <tbody>
                   {importedReadings.length === 0 ? (
                     <tr>
-                      <td colSpan="7">No imports yet. Paste payload and click Parse & Save Reading.</td>
+                      <td colSpan="9">No imports yet. Waiting for hardware or manual payload import.</td>
                     </tr>
                   ) : (
                     importedReadings.slice(0, 8).map((reading) => (
                       <tr key={reading.id}>
                         <td>{reading.timestamp}</td>
+                        <td>{reading.projectName || "Unassigned"}</td>
                         <td>{reading.format}</td>
-                        <td>{reading.doorWidth} in</td>
-                        <td>{reading.rampAngle} deg</td>
-                        <td>1:{reading.slopeRatio}</td>
+                        <td>{getMeasurementLabel(reading.measurementType || reading.sourceType)}</td>
+                        <td>
+                          {Number.isFinite(Number(reading.doorWidth)) ? `${Number(reading.doorWidth).toFixed(2)} in` : "N/A"}
+                        </td>
+                        <td>
+                          {Number.isFinite(Number(reading.rampAngle))
+                            ? `${Number(reading.rampAngle).toFixed(2)} deg`
+                            : "N/A"}
+                        </td>
+                        <td>
+                          {Number.isFinite(Number(reading.slopeRatio))
+                            ? `1:${Number(reading.slopeRatio).toFixed(2)}`
+                            : "N/A"}
+                        </td>
                         <td>{Number.isFinite(Number(reading.doorHeight)) ? `${reading.doorHeight} in` : "N/A"}</td>
                         <td>
                           {Number.isFinite(Number(reading.pathwayWidth))

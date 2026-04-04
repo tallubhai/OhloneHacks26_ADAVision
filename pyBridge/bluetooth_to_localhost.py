@@ -18,11 +18,11 @@ import time
 from urllib import request, error
 
 import serial
-from serial.tools import list_ports
+from serial.tools import list_ports as serial_list_ports
 
 
-def list_ports():
-    for p in list_ports.comports():
+def print_ports():
+    for p in serial_list_ports.comports():
         print(f"{p.device}\t{p.description}")
 
 
@@ -34,17 +34,47 @@ def parse_and_normalize(line, offset_in=3.5):
     if first == "*" and "|" in s:
         try:
             a, d = s[1:].split("|", 1)
-            return {"type": "combined", "ramp_angle": round(float(a), 2), "door_width": round(float(d) / 2.54 + offset_in, 2), "raw": s}
+            return {
+                "type": "combined",
+                "measurement_type": "combined",
+                "ramp_angle": round(float(a), 2),
+                "door_width": round(float(d) / 2.54 + offset_in, 2),
+                "raw": s
+            }
         except Exception:
             return None
     try:
         v = float(s[1:])
     except Exception:
         return None
-    if first in ("|", "*", "$"):
-        return {"type": "distance", "door_width": round(v / 2.54 + offset_in, 2), "raw": s}
+    if first == "|":
+        return {
+            "type": "door_width",
+            "measurement_type": "door_width",
+            "door_width": round(v / 2.54 + offset_in, 2),
+            "raw": s
+        }
+    if first == "*":
+        return {
+            "type": "door_height",
+            "measurement_type": "door_height",
+            "door_height": round(v / 2.54 + offset_in, 2),
+            "raw": s
+        }
+    if first == "$":
+        return {
+            "type": "pathway_width",
+            "measurement_type": "pathway_width",
+            "pathway_width": round(v / 2.54 + offset_in, 2),
+            "raw": s
+        }
     if first == "~":
-        return {"type": "angle", "ramp_angle": round(v, 2), "raw": s}
+        return {
+            "type": "angle",
+            "measurement_type": "ramp_angle",
+            "ramp_angle": round(v, 2),
+            "raw": s
+        }
     return None
 
 
@@ -76,7 +106,7 @@ def try_open_and_match(port_name, baud, sniff_s, offset_in):
 
 
 def discover_rx_port(baud, sniff_s, bt_filter, exclude_ports, offset_in):
-    ports = list(list_ports.comports())
+    ports = list(serial_list_ports.comports())
     if not ports:
         raise RuntimeError("No COM ports found")
     excl = {p.upper() for p in exclude_ports}
@@ -119,7 +149,7 @@ def main() -> int:
     args = p.parse_args()
 
     if args.list_ports:
-        list_ports()
+        print_ports()
         return 0
 
     selected_port = args.port

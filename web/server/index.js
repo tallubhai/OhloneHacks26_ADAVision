@@ -381,34 +381,62 @@ ${JSON.stringify(chunk)}`;
  * Updates in-memory `latestSensorReading` for {@link GET /api/sensors/latest}.
  */
 app.post("/api/sensors/ingest", (req, res) => {
-  const { ramp_angle: rampAngleRaw, door_width: doorWidthRaw, source = "bluetooth-bridge", raw } = req.body ?? {};
+  const {
+    ramp_angle: rampAngleRaw,
+    door_width: doorWidthRaw,
+    door_height: doorHeightRaw,
+    pathway_width: pathwayWidthRaw,
+    measurement_type: measurementTypeRaw,
+    source = "bluetooth-bridge",
+    raw
+  } = req.body ?? {};
 
   const rampAngle = Number(rampAngleRaw);
   const doorWidth = Number(doorWidthRaw);
+  const doorHeight = Number(doorHeightRaw);
+  const pathwayWidth = Number(pathwayWidthRaw);
 
-  if (!Number.isFinite(rampAngle) || !Number.isFinite(doorWidth)) {
+  const hasRampAngle = Number.isFinite(rampAngle);
+  const hasDoorWidth = Number.isFinite(doorWidth);
+  const hasDoorHeight = Number.isFinite(doorHeight);
+  const hasPathwayWidth = Number.isFinite(pathwayWidth);
+
+  if (!hasRampAngle && !hasDoorWidth && !hasDoorHeight && !hasPathwayWidth) {
     return res.status(400).json({
-      error: "Invalid payload. Expected numeric ramp_angle and door_width."
+      error: "Invalid payload. Provide at least one numeric field (ramp_angle, door_width, door_height, pathway_width)."
     });
   }
 
-  if (rampAngle <= 0 || rampAngle >= 89.9) {
+  if (hasRampAngle && (rampAngle <= 0 || rampAngle >= 89.9)) {
     return res.status(400).json({
       error: "ramp_angle must be between 0 and 89.9 degrees."
     });
   }
 
-  if (doorWidth <= 0) {
+  if (hasDoorWidth && doorWidth <= 0) {
     return res.status(400).json({
       error: "door_width must be positive."
+    });
+  }
+  if (hasDoorHeight && doorHeight <= 0) {
+    return res.status(400).json({
+      error: "door_height must be positive."
+    });
+  }
+  if (hasPathwayWidth && pathwayWidth <= 0) {
+    return res.status(400).json({
+      error: "pathway_width must be positive."
     });
   }
 
   latestSensorReading = {
     id: Date.now(),
     receivedAt: new Date().toISOString(),
-    rampAngle: Number(rampAngle.toFixed(2)),
-    doorWidth: Number(doorWidth.toFixed(2)),
+    measurementType: String(measurementTypeRaw || "unknown"),
+    rampAngle: hasRampAngle ? Number(rampAngle.toFixed(2)) : null,
+    doorWidth: hasDoorWidth ? Number(doorWidth.toFixed(2)) : null,
+    doorHeight: hasDoorHeight ? Number(doorHeight.toFixed(2)) : null,
+    pathwayWidth: hasPathwayWidth ? Number(pathwayWidth.toFixed(2)) : null,
     source: String(source),
     raw: typeof raw === "string" ? raw : ""
   };
