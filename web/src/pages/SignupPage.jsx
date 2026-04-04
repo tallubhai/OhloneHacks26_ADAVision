@@ -66,7 +66,7 @@ export default function SignupPage() {
               type="text"
               value={fullName}
               onChange={(event) => setFullName(event.target.value)}
-              placeholder="Bilal Salman"
+              placeholder="Your full name"
               required
             />
           </label>

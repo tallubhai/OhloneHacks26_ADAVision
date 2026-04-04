@@ -98,9 +98,13 @@ app.post("/api/ai/summary", async (req, res) => {
     verbosity = "standard",
     minDoorWidth,
     minSlopeRatio,
+    minDoorHeight,
+    minPathwayWidth,
     latestDoorWidth,
     latestRampAngle,
-    latestSlopeRatio
+    latestSlopeRatio,
+    latestDoorHeight,
+    latestPathwayWidth
   } = req.body ?? {};
   if (!rawReport || typeof rawReport !== "string") {
     return res.status(400).json({ error: "rawReport is required." });
@@ -113,14 +117,24 @@ app.post("/api/ai/summary", async (req, res) => {
 
   const ruleDoorWidth = toNumberOrNull(minDoorWidth);
   const ruleSlopeRatio = toNumberOrNull(minSlopeRatio);
+  const ruleDoorHeight = toNumberOrNull(minDoorHeight);
+  const rulePathwayWidth = toNumberOrNull(minPathwayWidth);
   const observedDoorWidth = toNumberOrNull(latestDoorWidth);
   const observedRampAngle = toNumberOrNull(latestRampAngle);
   const observedSlopeRatio = toNumberOrNull(latestSlopeRatio);
+  const observedDoorHeight = toNumberOrNull(latestDoorHeight);
+  const observedPathwayWidth = toNumberOrNull(latestPathwayWidth);
 
   const doorPass =
     ruleDoorWidth != null && observedDoorWidth != null ? observedDoorWidth >= ruleDoorWidth : null;
   const rampPass =
     ruleSlopeRatio != null && observedSlopeRatio != null ? observedSlopeRatio >= ruleSlopeRatio : null;
+  const doorHeightPass =
+    ruleDoorHeight != null && observedDoorHeight != null ? observedDoorHeight >= ruleDoorHeight : null;
+  const pathwayPass =
+    rulePathwayWidth != null && observedPathwayWidth != null
+      ? observedPathwayWidth >= rulePathwayWidth
+      : null;
 
   const verbosityGuide =
     verbosity === "concise"
@@ -135,6 +149,8 @@ ${verbosityGuide}
 CRITICAL RULES:
 - Door compliance rule: PASS if door width >= minimum door width; FAIL if door width is below minimum.
 - Ramp compliance rule: PASS if ramp ratio (run:rise, 1:X) is >= minimum ratio; FAIL if ratio is below minimum.
+- Door height rule: PASS if clear opening height >= minimum door height; FAIL if lower.
+- Pathway rule: PASS if clear pathway width >= minimum pathway width; FAIL if lower.
 - Do not contradict the numeric facts provided below.
 - If either check fails, clearly say "Non-compliant".
 - If both checks pass, clearly say "Compliant".
@@ -142,11 +158,17 @@ CRITICAL RULES:
 Building: ${buildingName || "Unknown building"}
 Minimum door width (in): ${ruleDoorWidth ?? "unknown"}
 Minimum ramp ratio (1:X): ${ruleSlopeRatio ?? "unknown"}
+Minimum door height (in): ${ruleDoorHeight ?? "unknown"}
+Minimum pathway width (in): ${rulePathwayWidth ?? "unknown"}
 Observed door width (in): ${observedDoorWidth ?? "unknown"}
 Observed ramp angle (deg): ${observedRampAngle ?? "unknown"}
 Observed ramp ratio (1:X): ${observedSlopeRatio ?? "unknown"}
+Observed door height (in): ${observedDoorHeight ?? "unknown"}
+Observed pathway width (in): ${observedPathwayWidth ?? "unknown"}
 Computed door result: ${doorPass == null ? "unknown" : doorPass ? "PASS" : "FAIL"}
 Computed ramp result: ${rampPass == null ? "unknown" : rampPass ? "PASS" : "FAIL"}
+Computed door height result: ${doorHeightPass == null ? "unknown" : doorHeightPass ? "PASS" : "FAIL"}
+Computed pathway result: ${pathwayPass == null ? "unknown" : pathwayPass ? "PASS" : "FAIL"}
 
 Report:
 ${rawReport}`;

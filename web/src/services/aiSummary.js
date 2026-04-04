@@ -35,9 +35,13 @@ export async function generateAiSummary({
   verbosity = "standard",
   minDoorWidth,
   minSlopeRatio,
+  minDoorHeight,
+  minPathwayWidth,
   latestDoorWidth,
   latestRampAngle,
-  latestSlopeRatio
+  latestSlopeRatio,
+  latestDoorHeight,
+  latestPathwayWidth
 }) {
   const text = await postAiRequest("/api/ai/summary", {
     rawReport,
@@ -45,9 +49,13 @@ export async function generateAiSummary({
     verbosity,
     minDoorWidth,
     minSlopeRatio,
+    minDoorHeight,
+    minPathwayWidth,
     latestDoorWidth,
     latestRampAngle,
-    latestSlopeRatio
+    latestSlopeRatio,
+    latestDoorHeight,
+    latestPathwayWidth
   });
   return `Summary:\n${text || "Summary unavailable."}`;
 }
