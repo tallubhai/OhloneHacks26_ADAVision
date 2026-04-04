@@ -1,182 +1,168 @@
-# ADA Vision Codebase Guide (What Actually Matters)
+# ADA Vision - Engineering Guide (3 Core Parts)
 
-This guide focuses on the code you actually wrote and demoed: hardware parsing, dashboard behavior, and AI generation.
+This guide intentionally avoids UI boilerplate details and focuses only on the three parts that make ADA Vision technically strong:
 
----
-
-## 1) The core idea in one sentence
-
-Arduino sends compact sensor lines, Python parses and normalizes them, the local API stores the latest reading, and the web app turns that into ADA checks + reports + AI explanation.
+1. Hardware measurement pipeline  
+2. Python parsing/bridge pipeline  
+3. AI compliance summary pipeline
 
 ---
 
-## 2) The only folders you need to present
+## 1) Hardware pipeline (Arduino + Bluetooth)
 
-## `arduino/` - device-side sensor output
-- Purpose: collect sensor values and emit serial lines.
-- Output format:
-  - `*<angle_degrees>|<distance_cm>`
-- Why it matters:
-  - This is the source signal for your whole pipeline.
+## Purpose
+Capture real physical measurements for ADA checks:
+- Ramp steepness (angle from level)
+- Door distance/width input
 
-## `pyBridge/` - hardware parsing and transport (most important for hardware->software story)
-- Purpose: connect to Bluetooth COM port, parse serial text, convert units, push clean JSON to localhost.
-- This is where hardware data becomes app-ready data.
+## Where the hardware code lives
+- `arduino/arduino.ino` (main runtime loop)
+- `arduino/imu.cpp` + `arduino/imu.h` (IMU angle reading/filtering)
+- `arduino/distance.cpp` + `arduino/distance.h` (distance sensor reads)
+- `arduino/bt.cpp` + `arduino/bt.h` (serial/Bluetooth transport)
 
-## `web/` - product app (frontend + backend)
-- `web/src/` is your React UI and report logic.
-- `web/server/` is your local backend for AI, scan API, and sensor ingest.
+## Data format emitted by hardware
+The Arduino sends one compact line over serial Bluetooth:
 
-## `docs/`
-- Documentation for explaining architecture and demo flow.
+`*<angle_degrees>|<distance_cm>`
+
+Example:
+
+`*6.25|71.40`
+
+This format is the hardware contract used by the rest of the system.
+
+## Why this is important in judging
+- Demonstrates real sensor integration, not mock data.
+- Produces deterministic machine-readable output.
+- Cleanly separates measurement capture from higher-level app logic.
 
 ---
 
-## 3) Files that are "real project logic" (not dependency plumbing)
+## 2) Python parsing bridge (hardware -> website/backend)
 
-Use this exact shortlist during judging.
+## Purpose
+The browser does **not** connect to Bluetooth directly.  
+Instead, a Python bridge reads serial data like a serial monitor, validates/parses it, normalizes units, and forwards it to the local API.
 
-## Hardware and parsing path (critical)
-
-- `arduino/arduino.ino`
-  - Reads IMU + distance sensor.
-  - Emits `*angle|distance_cm` lines over serial Bluetooth.
-
+## Where this code lives
 - `pyBridge/bluetooth_to_localhost.py`
-  - **Main hardware bridge script**.
-  - `parse_line(line)`:
-    - Validates `*` prefix and `|` delimiter.
-    - Parses angle and distance as numbers.
-    - Rejects invalid ranges.
-  - `to_door_width_inches(distance_cm, offset_inches)`:
-    - Converts cm -> inches.
-    - Adds +3.5 inch sensor offset.
-  - `post_reading(...)`:
-    - Sends normalized JSON to:
-      - `POST http://127.0.0.1:8787/api/sensors/ingest`
-  - Safe COM logic:
-    - Bluetooth port detection and filtering
-    - Excluding risky ports
-    - Cached last-good port
-    - Fails safely when port choice is ambiguous
+- `pyBridge/requirements.txt` (`pyserial`)
 
-## Backend logic (AI + sensor endpoints + website scan)
+## Core implementation details
 
-- `web/server/index.js`
-  - `POST /api/sensors/ingest`
-    - Validates numeric `ramp_angle` and `door_width`
-    - Saves latest reading in memory
-  - `GET /api/sensors/latest`
-    - Returns most recent bridge reading to UI
-  - `POST /api/ai/summary`
-    - Calls local Ollama
-    - Uses strict pass/fail rules in the prompt (door + ramp thresholds)
-    - Returns concise summary text
-  - `POST /api/websites/scan`
-    - Runs Puppeteer + Axe checks for accessibility violations
-  - `GET /api/health`
-    - Quick verification for backend + AI model wiring
+### A) Serial parsing
+- Function: `parse_line(line)`
+- Validates:
+  - starts with `*`
+  - contains `|`
+  - numeric angle and numeric distance
+  - value sanity checks (positive ranges)
 
-## Frontend logic (what user sees and clicks)
+### B) Unit conversion + hardware offset
+- Function: `to_door_width_inches(distance_cm, offset_inches)`
+- Formula:
+  - `door_width_inches = (distance_cm / 2.54) + 3.5`
+- Why:
+  - Sensor is mounted about 3.5 inches from the true door edge.
 
-- `web/src/App.jsx`
-  - Main app behavior:
-    - Home/Overview routing cards
-    - Import parsing UI
-    - Report generation
-    - AI summary trigger
-    - Settings thresholds
-    - Website scanner UI
-  - Polls `/api/sensors/latest` for bridge-fed live readings
-  - Builds ADA raw report using latest measurements
-  - Applies threshold rules in UI and report text
-  - Persists dashboard state to Firestore
+### C) Forwarding to website/backend
+- Function: `post_reading(...)`
+- Sends normalized JSON to:
+  - `POST http://127.0.0.1:8787/api/sensors/ingest`
+- Payload includes:
+  - `ramp_angle`
+  - `door_width`
+  - source metadata
+  - raw line (for debugging traceability)
 
-- `web/src/services/aiSummary.js`
-  - Frontend AI request wrapper for `/api/ai/summary`
-  - 30s timeout handling and error propagation
-  - Sends threshold + measurement context so AI decisions stay accurate
+### D) Safe COM port handling (important reliability feature)
+The bridge includes safety logic to avoid connecting to wrong ports:
+- Detect likely Bluetooth ports
+- Detect likely USB upload ports
+- Optional filters and exclusions
+- Cache last known good port
+- Fail safely when multiple ambiguous BT ports exist
 
-- `web/src/styles.css`
-  - Visual design and layout for your dashboard, home cards, and reports
-
-## Auth + project integration files
-
-- `web/src/firebase.js`
-  - Firebase Auth + Firestore initialization
-- `web/src/auth.js`
-  - Login/logout helper wrappers
-- `web/src/pages/LoginPage.jsx`
-- `web/src/pages/SignupPage.jsx`
-  - Auth UI pages
+## End-to-end bridge flow
+1. Read serial line from Bluetooth COM port
+2. Parse `*angle|distance_cm`
+3. Convert + apply offset
+4. POST clean JSON to local ingest endpoint
+5. Web app polls latest sensor reading and updates UI/report data
 
 ---
 
-## 4) Hardware -> parsing -> dashboard flow (explain this in demo)
+## 3) AI summary pipeline (compliance reasoning)
 
-1. Arduino emits: `*6.25|71.40`
-2. Python bridge reads serial line from Bluetooth COM port.
-3. Bridge parser extracts:
-   - `angle = 6.25`
-   - `distance_cm = 71.40`
-4. Bridge computes:
-   - `door_width_inches = (distance_cm / 2.54) + 3.5`
-5. Bridge posts:
-   - `{ ramp_angle, door_width, source, raw }`
-6. Backend validates and stores latest reading.
-7. Frontend polls and updates Import/Reports values.
-8. Report + AI summary use those exact readings.
+## Purpose
+Turn technical measurements/report text into clear natural-language compliance explanation for judges/users.
 
-This is your strongest engineering story because it proves:
-- hardware integration,
-- parsing correctness,
-- safe transport layer,
-- real-time UI update.
-
----
-
-## 5) AI feature (killer feature) - exact behavior
+## Where AI code lives
+- Frontend caller: `web/src/services/aiSummary.js`
+- Backend AI orchestration: `web/server/index.js` (`POST /api/ai/summary`)
 
 ## Model/runtime
-- Local Ollama endpoint:
-  - `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`)
-- Model:
-  - `OLLAMA_MODEL` (default `qwen2.5:0.5b` in current backend)
+- Provider: Local Ollama
+- Endpoint: `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`)
+- Model: `OLLAMA_MODEL` (current default: `qwen2.5:0.5b`)
 
-## Why AI is reliable now
-- Backend prompt includes hard pass/fail constraints:
+## How the AI call is implemented
+
+### Frontend
+- Builds/uses the latest raw inspection report
+- Sends thresholds + latest numeric measurements to backend
+- Uses timeout protection for failed/stuck calls
+
+### Backend
+- Constructs a strict prompt with explicit ADA pass/fail constraints:
   - Door PASS if `door_width >= minDoorWidth`
   - Ramp PASS if `slope_ratio >= minSlopeRatio`
-- Backend also sends computed PASS/FAIL facts into prompt.
-- Prompt explicitly forbids contradicting numeric facts.
+- Injects computed pass/fail facts directly into prompt
+- Instructs model not to contradict numeric facts
 
-## Fallback behavior
-- If AI is unavailable/timeouts:
-  - UI still returns deterministic local summary text.
-  - App does not break.
+## Why this AI implementation is strong
+- AI is grounded in numeric rules, not free-form guessing.
+- Prompt logic prevents contradictory conclusions.
+- Fail-safe behavior exists: if AI is unavailable, app falls back to deterministic local summary text.
 
 ---
 
-## 6) Files you can ignore in explanation
+## Runtime path (all 3 parts together)
 
-These are mostly framework/build/dependency plumbing:
-- `node_modules/`, `package-lock.json`
-- `.vite/`, `dist/`
-- generated caches (`__pycache__`, `.pyc`)
-- most config files unless asked deployment questions
+1. Arduino emits `*angle|distance_cm`
+2. Python bridge parses and normalizes data
+3. Bridge posts to `/api/sensors/ingest`
+4. Web app consumes latest reading from `/api/sensors/latest`
+5. Report generator applies ADA threshold rules
+6. AI endpoint explains results in plain language
 
-If judges ask "where is your actual logic?", point back to:
+---
+
+## What to present (and what to ignore)
+
+## Present these files
+- `arduino/arduino.ino`
+- `arduino/imu.cpp`
+- `arduino/distance.cpp`
+- `arduino/bt.cpp`
 - `pyBridge/bluetooth_to_localhost.py`
 - `web/server/index.js`
-- `web/src/App.jsx`
 - `web/src/services/aiSummary.js`
+- `web/src/App.jsx` (only for report/threshold data flow, not styling)
+
+## Ignore during explanation
+- CSS/layout polish
+- package/dependency lock files
+- framework bootstrap boilerplate
+- generated caches/build artifacts
 
 ---
 
-## 7) 30-second pitch script
+## 30-second judge script
 
-"Our Arduino streams compact lines like `*angle|distance_cm`.  
-Our Python bridge safely picks the right Bluetooth RX port, parses and validates each line, converts distance to real door width in inches with sensor offset, and posts clean JSON to our local API.  
-The React dashboard reads that live data, applies ADA thresholds, and generates reports.  
-Then our local AI layer explains compliance in plain language with strict numeric rules so the summary cannot contradict the measurements."
+"Our project has three real engineering layers.  
+First, Arduino firmware reads ramp angle and door distance and emits compact Bluetooth serial data.  
+Second, our Python bridge safely identifies the correct COM port, parses and validates that serial format, converts units with sensor offset correction, and forwards clean JSON to the local API.  
+Third, our AI pipeline takes the rule-checked report and generates a plain-language ADA summary using strict numeric constraints, so the explanation stays consistent with measured data."
 
