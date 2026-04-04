@@ -51,7 +51,13 @@ File and function reference
     - Performs a blocking HTTP POST (JSON) to the configured `endpoint`.
     - Uses a short timeout and ignores response body (treats non-network errors as retryable by caller).
   - `main()`
-    - CLI entrypoint: parses flags (`--port`, `--baud`, `--endpoint`, `--door-offset-in`, `--list-ports`) and runs the read → parse → post loop.
+    - CLI entrypoint: parses flags and runs the read → parse → post loop.
+      Supported CLI flags include:
+      - `--port` : manually specify COM port (e.g. COM5).
+      - `--sniff-timeout` : seconds to sniff each candidate when auto-detecting (default 3.0).
+      - `--bt-filter` : optional substring to filter Bluetooth candidates by device/description.
+      - `--exclude-port` : exclude one or more COM ports from auto-detection.
+      - `--list-ports`, `--baud`, `--endpoint`, `--door-offset-in` as before.
     - On each valid parse, it augments payload with `source` and posts it.
 
 Payload and server expectations

@@ -11,8 +11,6 @@ Usage examples:
 This file intentionally keeps logic small and readable.
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import sys
@@ -24,48 +22,29 @@ from serial.tools import list_ports
 
 
 def list_ports():
-    for p in serial.tools.list_ports.comports():
+    for p in list_ports.comports():
         print(f"{p.device}\t{p.description}")
 
 
-def parse_and_normalize(line: str, offset_in: float = 3.5) -> dict | None:
-    """Parse a line and return a dict payload or None if unrecognized.
-
-    Supported formats from `arduino.ino`:
-      - "|<distance_cm>"  (door width)
-      - "*<distance_cm>"  (door height)
-      - "$<distance_cm>"  (path width)
-      - "~<angle>"        (ramp angle)
-
-    Also accepts the combined form `*<angle>|<distance>` if produced.
-    """
+def parse_and_normalize(line, offset_in=3.5):
     s = line.strip()
     if not s:
         return None
-
     first = s[0]
-    # Combined form: *angle|distance
     if first == "*" and "|" in s:
         try:
-            angle_text, distance_text = s[1:].split("|", 1)
-            angle = float(angle_text)
-            dist_cm = float(distance_text)
+            a, d = s[1:].split("|", 1)
+            return {"type": "combined", "ramp_angle": round(float(a), 2), "door_width": round(float(d) / 2.54 + offset_in, 2), "raw": s}
         except Exception:
             return None
-        return {"type": "combined", "ramp_angle": round(angle, 2), "door_width": round(dist_cm / 2.54 + offset_in, 2), "raw": s}
-
     try:
-        value = float(s[1:])
+        v = float(s[1:])
     except Exception:
         return None
-
     if first in ("|", "*", "$"):
-        # distance in cm -> convert to inches and add offset
-        inches = round(value / 2.54 + offset_in, 2)
-        return {"type": "distance", "door_width": inches, "raw": s}
+        return {"type": "distance", "door_width": round(v / 2.54 + offset_in, 2), "raw": s}
     if first == "~":
-        return {"type": "angle", "ramp_angle": round(value, 2), "raw": s}
-
+        return {"type": "angle", "ramp_angle": round(v, 2), "raw": s}
     return None
 
 
@@ -77,30 +56,93 @@ def post_json(endpoint: str, payload: dict) -> None:
         resp.read()
 
 
+def try_open_and_match(port_name, baud, sniff_s, offset_in):
+    try:
+        with serial.Serial(port_name, baud, timeout=0.5) as ser:
+            end = time.time() + sniff_s
+            while time.time() < end:
+                b = ser.readline()
+                if not b:
+                    continue
+                try:
+                    t = b.decode("utf-8", errors="replace").strip()
+                except Exception:
+                    continue
+                if parse_and_normalize(t, offset_in=offset_in) is not None:
+                    return True
+    except Exception:
+        return False
+    return False
+
+
+def discover_rx_port(baud, sniff_s, bt_filter, exclude_ports, offset_in):
+    ports = list(list_ports.comports())
+    if not ports:
+        raise RuntimeError("No COM ports found")
+    excl = {p.upper() for p in exclude_ports}
+    candidates = []
+    for p in ports:
+        if p.device.upper() in excl:
+            continue
+        d = (p.description or "").lower()
+        h = (p.hwid or "").lower()
+        m = (getattr(p, "manufacturer", "") or "").lower()
+        # skip USB-upload/programming ports
+        if any(x in d or x in h or x in m for x in ("arduino", "ch340", "cp210", "ftdi", "usb serial")):
+            continue
+        if bt_filter and bt_filter.lower() not in (" ".join([p.device or "", p.description or "", p.hwid or "", getattr(p, "manufacturer", "") or ""]).lower()):
+            continue
+        candidates.append(p)
+    if not candidates:
+        raise RuntimeError("No candidate ports after filtering; run --list-ports")
+    # prefer ones mentioning bluetooth
+    for p in candidates:
+        if any("bluetooth" in s for s in ((p.description or "").lower(), (p.hwid or "").lower(), (getattr(p, "manufacturer", "") or "").lower())):
+            if try_open_and_match(p.device, baud, sniff_s, offset_in):
+                return p.device
+    for p in candidates:
+        if try_open_and_match(p.device, baud, sniff_s, offset_in):
+            return p.device
+    raise RuntimeError("Could not detect RX port automatically; pass --port")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Minimal serial → HTTP bridge")
-    p.add_argument("--port", help="COM port (e.g. COM5). If omitted, use --list-ports to inspect available ports.")
+    p.add_argument("--port", help="COM port (e.g. COM5). If omitted, auto-detects the RX port when safe.")
     p.add_argument("--baud", type=int, default=9600)
     p.add_argument("--endpoint", default="http://127.0.0.1:8787/api/sensors/ingest")
     p.add_argument("--door-offset-in", type=float, default=3.5)
     p.add_argument("--list-ports", action="store_true")
+    p.add_argument("--sniff-timeout", type=float, default=3.0, help="Seconds to sniff each candidate port when auto-detecting")
+    p.add_argument("--bt-filter", default="", help="Optional substring to filter Bluetooth candidates by device/description")
+    p.add_argument("--exclude-port", action="append", default=[], help="COM port to exclude when auto-detecting (can be used multiple times)")
     args = p.parse_args()
 
     if args.list_ports:
         list_ports()
         return 0
 
-    if not args.port:
-        print("Specify --port COMx or run with --list-ports to discover ports.")
-        return 2
+    selected_port = args.port
+    if not selected_port:
+        try:
+            selected_port = discover_rx_port(
+                baud=args.baud,
+                sniff_s=args.sniff_timeout,
+                bt_filter=args.bt_filter,
+                exclude_ports=set(args.exclude_port),
+                offset_in=args.door_offset_in,
+            )
+            print(f"[bridge] Auto-selected RX port: {selected_port}")
+        except RuntimeError as e:
+            print(f"[fatal] {e}")
+            return 2
 
     try:
-        ser = serial.Serial(args.port, args.baud, timeout=1)
+        ser = serial.Serial(selected_port, args.baud, timeout=1)
     except serial.SerialException as e:
-        print(f"Failed to open {args.port}: {e}")
+        print(f"Failed to open {selected_port}: {e}")
         return 1
-
-    print(f"Listening on {args.port} @ {args.baud}... Ctrl-C to stop")
+    print(f"Listening on {selected_port} @ {args.baud}... Ctrl-C to stop")
     try:
         while True:
             raw = ser.readline()
