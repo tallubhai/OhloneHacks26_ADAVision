@@ -1,15 +1,30 @@
 #!/usr/bin/env python3
 """
-Read Arduino Bluetooth output and forward parsed data to localhost API.
+@file bluetooth_to_localhost.py
+@brief Hardware → JSON bridge: read Arduino lines from Bluetooth serial, validate, POST to local API.
 
-Expected line format from serial:
-    *<angle_degrees>|<distance_cm>
+@section purpose Purpose
+The browser cannot open arbitrary Bluetooth serial ports. This script acts like a serial monitor:
+it reads lines from the paired COM port, parses the hardware format, converts units, and forwards
+normalized readings to the Node ingest endpoint.
+
+@section format Expected line format (strict parser)
+The function parse_line() accepts the compact combined form:
+    `*<angle_degrees>|<distance_cm>`
 
 Example:
-    *6.25|71.40
+    `*6.25|71.40`
 
-Distance conversion:
-    door_width_inches = (distance_cm / 2.54) + 3.5
+@section door_width Door width correction
+Ultrasonic sensor placement is offset from the true door edge. Inches are computed as:
+    `door_width_inches = (distance_cm / 2.54) + offset_inches`
+Default offset is 3.5 inches (CLI: `--door-offset-in`).
+
+@section flow End-to-end flow
+  1. Resolve COM port (`--port` or safe Bluetooth auto-discovery).
+  2. Read lines until one matches parse_line().
+  3. POST JSON to `http://127.0.0.1:8787/api/sensors/ingest` (default).
+  4. Web app polls `/api/sensors/latest`.
 """
 
 from __future__ import annotations
@@ -27,8 +42,15 @@ from serial.tools import list_ports
 
 def parse_line(line: str) -> tuple[float, float]:
     """
-    Parse '*angle|distance_cm' into numeric values.
-    Returns (angle_degrees, distance_cm).
+    @brief Parse a single serial line into ramp angle and distance.
+
+    @param line Raw UTF-8 line; must look like `*<angle>|<distance_cm>`.
+
+    @return (angle_degrees, distance_cm), each rounded to 2 decimal places.
+
+    @raises ValueError: empty line, bad prefix, missing '|', non-numeric fields, or out-of-range values.
+
+    @note Angle must be in (0, 89.9); distance must be positive. These checks match server validation.
     """
     raw = line.strip()
     if not raw:
@@ -51,11 +73,30 @@ def parse_line(line: str) -> tuple[float, float]:
 
 
 def to_door_width_inches(distance_cm: float, offset_inches: float) -> float:
+    """
+    @brief Convert sensor distance (cm) to clear door width in inches including mount offset.
+
+    @param distance_cm Raw ranging result in centimeters.
+    @param offset_inches Fixed correction from sensor face to measurable door plane (default 3.5).
+
+    @return Door width in inches, 2 decimal places.
+    """
     inches = (distance_cm / 2.54) + offset_inches
     return round(inches, 2)
 
 
 def post_reading(endpoint: str, angle: float, door_width_inches: float, raw_line: str) -> None:
+    """
+    @brief POST one normalized reading to the local ingest API.
+
+    @param endpoint Full URL (e.g. http://127.0.0.1:8787/api/sensors/ingest).
+    @param angle Ramp angle in degrees.
+    @param door_width_inches Corrected width in inches.
+    @param raw_line Original serial line for audit/debug in the dashboard.
+
+    @raises RuntimeError: HTTP status >= 300 after read.
+    @raises urllib.error.URLError: connection errors, timeouts, etc.
+    """
     payload = {
         "ramp_angle": round(angle, 2),
         "door_width": round(door_width_inches, 2),
@@ -76,6 +117,13 @@ def post_reading(endpoint: str, angle: float, door_width_inches: float, raw_line
 
 
 def is_bluetooth_port(port_info: list_ports.ListPortInfo) -> bool:
+    """
+    @brief Heuristic: is this COM port likely the Bluetooth SPP link (not USB-FTDI upload)?
+
+    @param port_info pySerial port metadata.
+
+    @return True if description/hwid/manufacturer suggests Bluetooth.
+    """
     desc = (port_info.description or "").lower()
     hwid = (port_info.hwid or "").lower()
     manu = (port_info.manufacturer or "").lower()
@@ -83,6 +131,13 @@ def is_bluetooth_port(port_info: list_ports.ListPortInfo) -> bool:
 
 
 def is_likely_upload_usb_port(port_info: list_ports.ListPortInfo) -> bool:
+    """
+    @brief Heuristic: USB serial used for Arduino sketch upload (avoid mistaking for BT RX).
+
+    @param port_info pySerial port metadata.
+
+    @return True if this looks like a typical USB-UART cable/chip.
+    """
     desc = (port_info.description or "").lower()
     hwid = (port_info.hwid or "").lower()
     manu = (port_info.manufacturer or "").lower()
@@ -93,10 +148,23 @@ def is_likely_upload_usb_port(port_info: list_ports.ListPortInfo) -> bool:
 
 
 def normalize_port_name(value: str) -> str:
+    """
+    @brief Normalize COM port name for comparison (strip, upper).
+    @param value Raw port string from user or cache.
+    @return Normalized name suitable for set membership checks.
+    """
     return value.strip().upper()
 
 
 def port_matches_filter(port_info: list_ports.ListPortInfo, filter_text: str) -> bool:
+    """
+    @brief Optional substring filter when several Bluetooth COM ports exist.
+
+    @param port_info Candidate port.
+    @param filter_text Case-insensitive substring matched against device, desc, hwid, manufacturer.
+
+    @return True if filter is empty or substring matches.
+    """
     needle = filter_text.lower().strip()
     if not needle:
         return True
@@ -112,6 +180,9 @@ def port_matches_filter(port_info: list_ports.ListPortInfo, filter_text: str) ->
 
 
 def list_ports_with_labels() -> None:
+    """
+    @brief Print all COM ports with bridge labels (diagnostic / setup helper).
+    """
     ports = list(list_ports.comports())
     if not ports:
         print("[bridge] No COM ports detected.")
@@ -131,6 +202,17 @@ def list_ports_with_labels() -> None:
 
 
 def try_open_and_match(port_name: str, baud: int, timeout_s: float) -> bool:
+    """
+    @brief Open port briefly and return True if a valid parse_line() frame appears.
+
+    Used to validate cached port without staying connected.
+
+    @param port_name e.g. COM5.
+    @param baud Serial speed.
+    @param timeout_s Per-read timeout and outer time budget for sniffing.
+
+    @return True if at least one line parsed successfully.
+    """
     try:
         with serial.Serial(port_name, baud, timeout=timeout_s) as ser:
             start = time.time()
@@ -150,6 +232,13 @@ def try_open_and_match(port_name: str, baud: int, timeout_s: float) -> bool:
 
 
 def load_cached_port(cache_path: str) -> str | None:
+    """
+    @brief Load last known-good COM port from JSON cache.
+
+    @param cache_path Filesystem path to cache file.
+
+    @return Normalized port name or None if missing/invalid.
+    """
     if not os.path.exists(cache_path):
         return None
     try:
@@ -164,6 +253,11 @@ def load_cached_port(cache_path: str) -> str | None:
 
 
 def save_cached_port(cache_path: str, port_name: str) -> None:
+    """
+    @brief Persist successful port choice so next run can try it first.
+
+    Failures are swallowed so a read-only filesystem does not kill the bridge.
+    """
     try:
         cache_dir = os.path.dirname(cache_path)
         if cache_dir:
@@ -183,6 +277,20 @@ def discover_rx_port(
     bt_filter: str,
     cache_path: str
 ) -> str:
+    """
+    @brief Auto-select a Bluetooth COM port that emits parseable `*angle|distance` lines.
+
+    @param baud Serial baud rate.
+    @param timeout_s read timeout per Serial read.
+    @param sniff_s Total time window to try candidates.
+    @param exclude_ports COM ports user asked to skip (e.g. wired USB).
+    @param bt_filter Optional substring to disambiguate multiple BT modules.
+    @param cache_path Path for last-good-port JSON.
+
+    @return Device name of chosen port (e.g. COM7).
+
+    @raises RuntimeError: no ports, no BT match, ambiguous multi-BT without filter, or sniff timeout.
+    """
     ports = list(list_ports.comports())
     if not ports:
         raise RuntimeError("No COM ports found.")
@@ -212,6 +320,7 @@ def discover_rx_port(
     for p in bluetooth_ports:
         print(f"  - {p.device}: {p.description}")
 
+    # Safety: opening the wrong BT port could grab a headset or another device — force user disambiguation.
     if len(bluetooth_ports) > 1 and not bt_filter and not cached_port:
         raise RuntimeError(
             "Multiple Bluetooth ports found and none cached. "
@@ -246,6 +355,10 @@ def discover_rx_port(
 
 
 def main() -> int:
+    """
+    @brief CLI entry: list ports, discover, or stream-parse to HTTP ingest.
+    @return Process exit code (0 success, 1 fatal error).
+    """
     parser = argparse.ArgumentParser(description="Bluetooth serial to localhost bridge for ADA Vision.")
     parser.add_argument(
         "--port",

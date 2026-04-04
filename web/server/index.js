@@ -1,3 +1,19 @@
+/**
+ * @file ADA Vision local API (Express).
+ * @summary Backend for sensor ingest, latest-reading polling, Ollama-backed AI summaries, and axe website scans.
+ *
+ * @description
+ * - {@link POST /api/sensors/ingest} — Accepts normalized readings from `pyBridge/bluetooth_to_localhost.py`.
+ * - {@link GET /api/sensors/latest} — Returns last ingested reading for the web app poll loop.
+ * - {@link POST /api/ai/summary} — Builds a grounded prompt (numeric pass/fail facts) and calls Ollama.
+ * - {@link POST /api/ai/website-report} — Plain-language accessibility narrative from scan results.
+ * - {@link POST /api/websites/scan} — Puppeteer + axe-core against a target URL.
+ *
+ * Environment:
+ * - `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`)
+ * - `OLLAMA_MODEL` (default `qwen2.5:0.5b`)
+ */
+
 import express from "express";
 import cors from "cors";
 import puppeteer from "puppeteer";
@@ -9,11 +25,17 @@ const require = createRequire(import.meta.url);
 const axeScriptPath = require.resolve("axe-core/axe.min.js");
 const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
 const ollamaModel = process.env.OLLAMA_MODEL || "qwen2.5:0.5b";
+/** @type {object | null} Last successful {@link POST /api/sensors/ingest} payload (in-memory). */
 let latestSensorReading = null;
 
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
+/**
+ * Shapes one axe violation for the client / AI prompts.
+ * @param {import("axe-core").Result} violation
+ * @returns {object}
+ */
 function normalizeViolation(violation) {
   return {
     id: violation.id,
@@ -29,6 +51,11 @@ function normalizeViolation(violation) {
   };
 }
 
+/**
+ * Compact rule summary (pass or fail bucket) with element counts.
+ * @param {import("axe-core").Result} rule
+ * @returns {object}
+ */
 function normalizeRuleResult(rule) {
   return {
     id: rule.id,
@@ -49,6 +76,12 @@ app.get("/api/health", (_req, res) => {
   });
 });
 
+/**
+ * POST to Ollama `/api/generate` with low temperature; 45s abort.
+ * @param {string} prompt Full user/system prompt text.
+ * @returns {Promise<string>} Trimmed model response text.
+ * @throws {Error} On HTTP errors, timeouts, or unreachable Ollama.
+ */
 async function runOllamaPrompt(prompt) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 45000);
@@ -91,6 +124,15 @@ async function runOllamaPrompt(prompt) {
   }
 }
 
+/**
+ * AI compliance summary: injects computed door/ramp pass-fail so the model cannot contradict measurements.
+ *
+ * Request body:
+ * - `rawReport` (string, required) — inspection text from the app.
+ * - `buildingName`, `verbosity` — tune output length.
+ * - `minDoorWidth`, `minSlopeRatio`, `minDoorHeight`, `minPathwayWidth` — ADA thresholds from UI.
+ * - Latest observed door/ramp/height/pathway values — grounding for the model.
+ */
 app.post("/api/ai/summary", async (req, res) => {
   const {
     rawReport,
@@ -110,6 +152,7 @@ app.post("/api/ai/summary", async (req, res) => {
     return res.status(400).json({ error: "rawReport is required." });
   }
 
+  /** @param {unknown} value */
   const toNumberOrNull = (value) => {
     const numeric = Number(value);
     return Number.isFinite(numeric) ? numeric : null;
@@ -125,10 +168,13 @@ app.post("/api/ai/summary", async (req, res) => {
   const observedDoorHeight = toNumberOrNull(latestDoorHeight);
   const observedPathwayWidth = toNumberOrNull(latestPathwayWidth);
 
+  // Door: wider is better — pass when observed >= minimum clear width.
   const doorPass =
     ruleDoorWidth != null && observedDoorWidth != null ? observedDoorWidth >= ruleDoorWidth : null;
+  // Ramp: ratio is run:rise as 1:X — larger X is flatter/better — pass when observed >= minimum.
   const rampPass =
     ruleSlopeRatio != null && observedSlopeRatio != null ? observedSlopeRatio >= ruleSlopeRatio : null;
+  // Taller opening / wider path are better — same ">=" pattern as door width.
   const doorHeightPass =
     ruleDoorHeight != null && observedDoorHeight != null ? observedDoorHeight >= ruleDoorHeight : null;
   const pathwayPass =
@@ -184,6 +230,7 @@ ${rawReport}`;
   }
 });
 
+/** Turn axe-style violation list into a structured plain-text report via Ollama. */
 app.post("/api/ai/website-report", async (req, res) => {
   const { url, violations = [], counts = {} } = req.body ?? {};
   if (!url || typeof url !== "string") {
@@ -216,6 +263,10 @@ Violations: ${JSON.stringify(Array.isArray(violations) ? violations.slice(0, 15)
   }
 });
 
+/**
+ * Ingest one reading from the Python Bluetooth bridge. Validates ranges to match bridge rules.
+ * Updates in-memory `latestSensorReading` for {@link GET /api/sensors/latest}.
+ */
 app.post("/api/sensors/ingest", (req, res) => {
   const { ramp_angle: rampAngleRaw, door_width: doorWidthRaw, source = "bluetooth-bridge", raw } = req.body ?? {};
 
@@ -255,6 +306,7 @@ app.post("/api/sensors/ingest", (req, res) => {
   });
 });
 
+/** Return the last ingested reading (may be `reading: null` if none yet). */
 app.get("/api/sensors/latest", (_req, res) => {
   return res.json({
     ok: true,
@@ -262,6 +314,7 @@ app.get("/api/sensors/latest", (_req, res) => {
   });
 });
 
+/** Headless Chromium: load URL, inject axe-core, return violations and pass summaries. */
 app.post("/api/websites/scan", async (req, res) => {
   const { url } = req.body ?? {};
 
@@ -323,5 +376,6 @@ app.post("/api/websites/scan", async (req, res) => {
 });
 
 app.listen(port, () => {
+  // Single process holds sensor memory + spawns Puppeteer per scan; dev/demo use only.
   console.log(`Axe scan API running on http://localhost:${port}`);
 });

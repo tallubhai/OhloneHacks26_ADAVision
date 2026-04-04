@@ -1,3 +1,8 @@
+/**
+ * @file imu.cpp
+ * @brief MPU6050 I2C reads + complementary filter for stable tilt angles.
+ */
+
 #include "imu.h"
 #include <Wire.h>
 #include <math.h>
@@ -6,7 +11,7 @@ IMU::IMU(uint8_t addr) : mpu_addr(addr), pitch(0), roll(0), yaw(0), lastTime(0) 
 
 void IMU::begin() {
   Wire.begin();
-  // Wake up MPU6050
+  // Wake up MPU6050 (exit sleep)
   Wire.beginTransmission(mpu_addr);
   Wire.write(0x6B);
   Wire.write(0x00);
@@ -32,7 +37,7 @@ void IMU::readAngles(float &outPitch, float &outRoll, float &outYaw, float &angl
   float dt = (now - lastTime) / 1000.0;
   lastTime = now;
 
-  // Read accelerometer
+  // Accelerometer: registers 0x3B..0x40, ±2g → 16384 LSB/g
   int16_t AccX, AccY, AccZ;
   Wire.beginTransmission(mpu_addr);
   Wire.write(0x3B);
@@ -46,7 +51,7 @@ void IMU::readAngles(float &outPitch, float &outRoll, float &outYaw, float &angl
   float Ay = AccY / 16384.0;
   float Az = AccZ / 16384.0;
 
-  // Read gyroscope
+  // Gyroscope: registers 0x43..0x48, ±250°/s → 131 LSB/(°/s)
   int16_t GyX, GyY, GyZ;
   Wire.beginTransmission(mpu_addr);
   Wire.write(0x43);
@@ -60,7 +65,7 @@ void IMU::readAngles(float &outPitch, float &outRoll, float &outYaw, float &angl
   float gy = GyY / 131.0;
   float gz = GyZ / 131.0;
 
-  // Complementary filter for pitch & roll
+  // Complementary filter: trust gyro short-term, accelerometer long-term for pitch/roll
   float pitchAcc = atan2(Ax, sqrt(Ay*Ay + Az*Az)) * 180.0 / PI;
   float rollAcc  = atan2(Ay, sqrt(Ax*Ax + Az*Az)) * 180.0 / PI;
 
@@ -68,10 +73,10 @@ void IMU::readAngles(float &outPitch, float &outRoll, float &outYaw, float &angl
   pitch = alpha * (pitch + gx * dt) + (1 - alpha) * pitchAcc;
   roll  = alpha * (roll  + gy * dt) + (1 - alpha) * rollAcc;
 
-  // Yaw integration
+  // Yaw: no mag reference, so this drifts; still exposed for completeness
   yaw += gz * dt;
 
-  // Angle from level
+  // Angle between gravity vector and vertical: 0° = level, larger = more tilted
   angleFromLevel = acos(Az / sqrt(Ax*Ax + Ay*Ay + Az*Az)) * 180.0 / PI;
 
   outPitch = pitch;

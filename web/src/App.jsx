@@ -16,6 +16,19 @@ import { auth, db } from "./firebase";
 import { logout } from "./auth";
 import { generateAiSummary } from "./services/aiSummary";
 
+/**
+ * @file App.jsx (report / threshold / sensor slice)
+ *
+ * Data path for demos (see docs/CODEBASE_GUIDE.md):
+ * 1. Python bridge POSTs to `/api/sensors/ingest` → server stores latest reading.
+ * 2. This app polls `GET /api/sensors/latest` and prepends new rows to `importedReadings`.
+ * 3. `buildReportMeasurements()` merges logs + imports (newest first) for the report.
+ * 4. `generateRawReport` / `buildRawReport` embed thresholds (`minDoorWidth`, `minSlopeRatio`).
+ * 5. `generateSummary` sends that text + the same thresholds and latest numbers to `generateAiSummary`.
+ *
+ * Ramp math: angle θ → tangent → slope ratio 1:X as run:rise, where X = 1/tan(θ). Larger X = flatter ramp.
+ */
+
 const sidebarItems = [
   "Overview",
   "Import",
@@ -24,6 +37,7 @@ const sidebarItems = [
   "Settings"
 ];
 
+/** @returns {string} Local calendar date `YYYY-MM-DD` for inspection date defaults. */
 function getTodayIsoDate() {
   const now = new Date();
   const year = now.getFullYear();
@@ -32,22 +46,46 @@ function getTodayIsoDate() {
   return `${year}-${month}-${day}`;
 }
 
+/**
+ * Door rule: pass when clear width meets or exceeds the configured minimum (typ. 32 in).
+ * @param {number} doorWidthInches Observed width in inches.
+ * @param {number} [minDoorWidth=32] Required minimum width in inches.
+ * @returns {boolean}
+ */
 function evaluateDoor(doorWidthInches, minDoorWidth = 32) {
   return Number(doorWidthInches) >= Number(minDoorWidth);
 }
 
+/**
+ * Door clear height: pass when measured height meets or exceeds minimum. Null = not captured.
+ * @param {number} doorHeightInches
+ * @param {number} [minDoorHeight=80]
+ * @returns {boolean|null}
+ */
 function evaluateDoorHeight(doorHeightInches, minDoorHeight = 80) {
   const doorHeight = Number(doorHeightInches);
   if (!Number.isFinite(doorHeight) || doorHeight <= 0) return null;
   return doorHeight >= Number(minDoorHeight);
 }
 
+/**
+ * Pathway clear width: pass when width meets or exceeds minimum. Null = not captured.
+ * @param {number} pathwayWidthInches
+ * @param {number} [minPathwayWidth=36]
+ * @returns {boolean|null}
+ */
 function evaluatePathwayWidth(pathwayWidthInches, minPathwayWidth = 36) {
   const pathwayWidth = Number(pathwayWidthInches);
   if (!Number.isFinite(pathwayWidth) || pathwayWidth <= 0) return null;
   return pathwayWidth >= Number(minPathwayWidth);
 }
 
+/**
+ * Ramp rule: convert angle to run:rise ratio 1:X; pass when X ≥ minimum (flatter is better).
+ * @param {number} angleDegrees Ramp angle from horizontal, degrees.
+ * @param {number} [minSlopeRatio=12] Minimum acceptable 1:X (e.g. 12 means 1:12 or flatter).
+ * @returns {boolean}
+ */
 function evaluateRamp(angleDegrees, minSlopeRatio = 12) {
   const radians = (Number(angleDegrees) * Math.PI) / 180;
   const tangent = Math.tan(radians);
@@ -60,6 +98,10 @@ function evaluateRamp(angleDegrees, minSlopeRatio = 12) {
   return slopeRatio >= Number(minSlopeRatio);
 }
 
+/**
+ * @param {number} angleDegrees
+ * @returns {number} Run:rise ratio 1:X (0 if angle invalid for tan).
+ */
 function calculateSlopeRatio(angleDegrees) {
   const radians = (Number(angleDegrees) * Math.PI) / 180;
   const tangent = Math.tan(radians);
@@ -69,6 +111,21 @@ function calculateSlopeRatio(angleDegrees) {
   return 1 / tangent;
 }
 
+/**
+ * Build the multi-line inspection string shown in the Reports UI and sent to the AI backend.
+ *
+ * @param {object} opts
+ * @param {string} opts.buildingName
+ * @param {string} opts.inspectorName
+ * @param {string} opts.inspectionDate
+ * @param {string} opts.notes Free-form notes section.
+ * @param {Array<{ doorWidth: number, rampAngle: number, timestamp?: string }>} opts.measurements Newest-first list; index 0 is “latest”.
+ * @param {number} opts.minDoorWidth Threshold (inches).
+ * @param {number} opts.minSlopeRatio Threshold as 1:X.
+ * @param {number} opts.minDoorHeight Minimum clear door height (inches).
+ * @param {number} opts.minPathwayWidth Minimum pathway width (inches).
+ * @returns {string}
+ */
 function generateRawReport({
   buildingName,
   inspectorName,
@@ -117,6 +174,20 @@ Notes: ${notes}
 `;
 }
 
+/**
+ * Deterministic fallback summary when Ollama is down or the user has not generated AI text yet.
+ * Mirrors pass/fail logic for door width, ramp, door height, and pathway width where captured.
+ *
+ * @param {object} opts
+ * @param {string} opts.buildingName
+ * @param {Array<{ doorWidth: number, rampAngle: number, doorHeight?: number, pathwayWidth?: number }>} opts.measurements
+ * @param {number} opts.minDoorWidth
+ * @param {number} opts.minSlopeRatio
+ * @param {number} opts.minDoorHeight
+ * @param {number} opts.minPathwayWidth
+ * @param {"concise"|"standard"|"detailed"} [opts.verbosity]
+ * @returns {string}
+ */
 function summarizeReport({
   buildingName,
   measurements,
@@ -176,6 +247,10 @@ Recommendation: continue periodic checks to maintain compliance over time.`;
   return passSummary;
 }
 
+/**
+ * Parse pasted JSON/CSV-like payloads from the Import tab into `{ doorWidth, rampAngle, ... }`.
+ * Not on the main hardware→AI path; kept for manual data entry.
+ */
 function parseImportPayload(rawPayload) {
   const payload = rawPayload.trim();
   if (!payload) {
@@ -390,6 +465,7 @@ function parseWebsiteReportSections(reportText) {
   });
 }
 
+/** Strip deprecated “Recent Measurements” blocks from older saved Firestore reports. */
 function sanitizeLegacyReportText(reportText) {
   const text = String(reportText || "").replace(/Inspector:\s*Bilal Salman/gi, "Inspector: Inspector");
   if (!text.includes("Recent Measurements:")) return text;
@@ -440,7 +516,14 @@ export default function App() {
   const [loadingSavedInspections, setLoadingSavedInspections] = useState(false);
   const [cloudStateReady, setCloudStateReady] = useState(false);
   const cloudStateLoadedRef = useRef(false);
+  /** Dedupes Bluetooth ingest: same `reading.id` from `/api/sensors/latest` is applied once. */
   const lastSensorReadingIdRef = useRef(null);
+
+  /**
+   * Measurements fed into report + AI: prefer `logs` and `importedReadings` (includes BT bridge),
+   * sorted newest-first, capped at 20; otherwise a single fallback from manual sliders.
+   * @returns {Array<{ id: number, timestamp: string, doorWidth: number, rampAngle: number }>}
+   */
   function buildReportMeasurements() {
     const sourceMeasurements = [
       ...logs.map((entry) => ({
@@ -475,6 +558,7 @@ export default function App() {
     return sourceMeasurements.length > 0 ? sourceMeasurements : [fallbackMeasurement];
   }
 
+  /** @param {Array<{ id: number, timestamp: string, doorWidth: number, rampAngle: number }>} measurements */
   function buildRawReport(measurements) {
     return generateRawReport({
       buildingName,
@@ -551,6 +635,10 @@ export default function App() {
     return () => clearInterval(intervalId);
   }, []);
 
+  /**
+   * Polls the backend for the latest Bluetooth-ingested sample (bridge → `/api/sensors/ingest`).
+   * New readings become import rows and refresh the visible door/ramp fields for the report.
+   */
   useEffect(() => {
     let cancelled = false;
 
@@ -572,6 +660,7 @@ export default function App() {
 
         const rampAngleValue = Number(reading.rampAngle);
         const doorWidthValue = Number(reading.doorWidth);
+        // Treat bridge data like an import row so it flows through the same report pipeline.
         const importedEntry = {
           id: Date.now(),
           timestamp: new Date(reading.receivedAt || Date.now()).toLocaleString(),
@@ -589,7 +678,7 @@ export default function App() {
         setRampAngle(importedEntry.rampAngle);
         setLastRefreshedAt(importedEntry.timestamp);
       } catch (_error) {
-        // Ignore polling errors so local/offline mode still works.
+        // No backend / CORS / network: keep UI usable with manual or cached values.
       }
     }
 
@@ -739,6 +828,14 @@ export default function App() {
     window.location.href = "/login.html";
   }
 
+  /**
+   * AI summary path: prefers `compiledMeasurements` when set, else `buildReportMeasurements()`.
+   * Sends `rawReport` + thresholds + latest numeric facts to `/api/ai/summary` via `generateAiSummary`.
+   * On failure, appends deterministic `summarizeReport` output with an error notice.
+   *
+   * @param {string} [rawReportOverride]
+   * @param {Array<{ id?: number, timestamp?: string, doorWidth: number, rampAngle: number, doorHeight?: number, pathwayWidth?: number }>} [measurementsOverride]
+   */
   async function generateSummary(rawReportOverride, measurementsOverride) {
     const measurements =
       measurementsOverride ||
@@ -766,6 +863,7 @@ export default function App() {
       const latestMeasurement = measurements[0] || {};
       const latestDoorWidth = Number(latestMeasurement.doorWidth);
       const latestRampAngle = Number(latestMeasurement.rampAngle);
+      // Must match server-side interpretation of ramp rule (1:X from angle).
       const latestSlopeRatio = calculateSlopeRatio(latestRampAngle);
       const aiSummary = await generateAiSummary({
         rawReport,
@@ -793,6 +891,7 @@ export default function App() {
     }
   }
 
+  /** Snapshot current merged measurements into `compiledMeasurements` and refresh `reportText`. */
   function generateReportFromLatestData() {
     const measurements = buildReportMeasurements();
     const rawReport = buildRawReport(measurements);
@@ -801,6 +900,7 @@ export default function App() {
     return { rawReport, measurements };
   }
 
+  /** CSV export uses the same `evaluateDoor` / `evaluateRamp` columns as the on-screen thresholds. */
   function exportReportCsv() {
     const measurements =
       compiledMeasurements.length > 0
