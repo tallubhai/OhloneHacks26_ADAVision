@@ -1,7 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
 import {
-  addDoc,
   collection,
   doc,
   getDoc,
@@ -14,7 +13,7 @@ import {
 } from "firebase/firestore";
 import { auth, db } from "./firebase";
 import { logout } from "./auth";
-import { generateAiSummary, generateAiWebsiteReport } from "./services/aiSummary";
+import { generateAiSummary } from "./services/aiSummary";
 
 const sidebarItems = [
   "Overview",
@@ -23,6 +22,14 @@ const sidebarItems = [
   "Websites",
   "Settings"
 ];
+
+function getTodayIsoDate() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
 
 function evaluateDoor(doorWidthInches, minDoorWidth = 32) {
   return Number(doorWidthInches) >= Number(minDoorWidth);
@@ -63,29 +70,15 @@ function generateRawReport({
   const latestRampPass = evaluateRamp(latest.rampAngle, minSlopeRatio);
   const latestSlope = calculateSlopeRatio(latest.rampAngle);
 
-  const measurementRows = measurements
-    .slice(0, 10)
-    .map((entry, index) => {
-      const rowDoorPass = evaluateDoor(entry.doorWidth, minDoorWidth);
-      const rowRampPass = evaluateRamp(entry.rampAngle, minSlopeRatio);
-      const rowSlope = calculateSlopeRatio(entry.rampAngle);
-      return `${index + 1}. [${entry.timestamp}] Door=${Number(entry.doorWidth).toFixed(
-        1
-      )} in (${rowDoorPass ? "PASS" : "FAIL"}) | Ramp=1:${rowSlope.toFixed(2)} (${rowRampPass ? "PASS" : "FAIL"})`;
-    })
-    .join("\n");
-
   return `ADA Inspection Report
 Building: ${buildingName}
 Inspector: ${inspectorName}
 Inspection Date: ${inspectionDate}
 Generated: ${new Date().toLocaleString()}
 
-Ramp Slope: 1:${latestSlope.toFixed(2)} (${latestRampPass ? "Compliant" : "Non-compliant"}, threshold 1:${minSlopeRatio})
-Door Width: ${Number(latest.doorWidth).toFixed(1)} in (${latestDoorPass ? "Compliant" : "Non-compliant"}, threshold ${minDoorWidth} in)
-
-Recent Measurements:
-${measurementRows}
+Latest Measurement: ${latest.timestamp}
+Ramp Ratio (run:rise): 1:${latestSlope.toFixed(2)} (${latestRampPass ? "Compliant" : "Non-compliant"}; pass if ratio is 1:${minSlopeRatio} or flatter)
+Door Width: ${Number(latest.doorWidth).toFixed(1)} in (${latestDoorPass ? "Compliant" : "Non-compliant"}; pass if width is ${minDoorWidth} in or wider)
 
 Notes: ${notes}
 `;
@@ -324,6 +317,12 @@ function parseWebsiteReportSections(reportText) {
   });
 }
 
+function sanitizeLegacyReportText(reportText) {
+  const text = String(reportText || "");
+  if (!text.includes("Recent Measurements:")) return text;
+  return text.replace(/\nRecent Measurements:\n[\s\S]*?\n\nNotes:/, "\nNotes:");
+}
+
 export default function App() {
   const [activeMenu, setActiveMenu] = useState("Overview");
   const [authUser, setAuthUser] = useState(null);
@@ -331,18 +330,12 @@ export default function App() {
 
   const [buildingName, setBuildingName] = useState("City Hall");
   const [inspectorName, setInspectorName] = useState("Bilal Salman");
-  const [inspectionDate, setInspectionDate] = useState(new Date().toISOString().slice(0, 10));
+  const [inspectionDate, setInspectionDate] = useState(getTodayIsoDate());
   const [minSlopeRatio, setMinSlopeRatio] = useState(12);
   const [minDoorWidth, setMinDoorWidth] = useState(32);
   const [doorWidth, setDoorWidth] = useState(29);
   const [rampAngle, setRampAngle] = useState(6.2);
-  const [bluetoothState, setBluetoothState] = useState("Not connected");
-  const [bluetoothLoading, setBluetoothLoading] = useState(false);
-  const [knownBluetoothDevices, setKnownBluetoothDevices] = useState([]);
-  const [selectedBluetoothDevice, setSelectedBluetoothDevice] = useState("");
   const [themeMode, setThemeMode] = useState("light");
-  const [aiSummaryEnabled, setAiSummaryEnabled] = useState(true);
-  const [aiVerbosity, setAiVerbosity] = useState("standard");
   const [lastRefreshedAt, setLastRefreshedAt] = useState("Not refreshed yet");
   const [reportText, setReportText] = useState("");
   const [summaryText, setSummaryText] = useState("Import measurements to auto-generate a report and readable summary.");
@@ -360,15 +353,12 @@ export default function App() {
   const [websiteScanLoading, setWebsiteScanLoading] = useState(false);
   const [websiteScanError, setWebsiteScanError] = useState("");
   const [websiteScanResult, setWebsiteScanResult] = useState(null);
-  const [websiteReportText, setWebsiteReportText] = useState("");
-  const [websiteReportLoading, setWebsiteReportLoading] = useState(false);
   const [savedWebsiteInspections, setSavedWebsiteInspections] = useState([]);
   const [selectedInspectionId, setSelectedInspectionId] = useState("");
   const [loadingSavedInspections, setLoadingSavedInspections] = useState(false);
-  const [saveInspectionStatus, setSaveInspectionStatus] = useState("");
-  const [saveInspectionError, setSaveInspectionError] = useState("");
   const [cloudStateReady, setCloudStateReady] = useState(false);
   const cloudStateLoadedRef = useRef(false);
+  const lastSensorReadingIdRef = useRef(null);
   function buildReportMeasurements() {
     const sourceMeasurements = [
       ...logs.map((entry) => ({
@@ -408,13 +398,6 @@ export default function App() {
       minSlopeRatio
     });
   }
-
-
-  const doorPass = evaluateDoor(doorWidth, minDoorWidth);
-  const rampPass = evaluateRamp(rampAngle, minSlopeRatio);
-  const slopeRatio = calculateSlopeRatio(rampAngle);
-
-
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       setAuthUser(user);
@@ -463,52 +446,68 @@ export default function App() {
   }, [importedReadings]);
 
   useEffect(() => {
-    const savedDevices = localStorage.getItem("adaVisionKnownBluetoothDevices");
-    if (savedDevices) {
-      try {
-        const parsed = JSON.parse(savedDevices);
-        if (Array.isArray(parsed)) {
-          setKnownBluetoothDevices(parsed);
-        }
-      } catch (error) {
-        console.error("Unable to parse known bluetooth devices", error);
-      }
-    }
-  }, []);
-
-  useEffect(() => {
-    localStorage.setItem("adaVisionKnownBluetoothDevices", JSON.stringify(knownBluetoothDevices));
-  }, [knownBluetoothDevices]);
-
-  useEffect(() => {
-    async function loadPreviouslyPairedDevices() {
-      if (!("bluetooth" in navigator) || !navigator.bluetooth.getDevices) {
-        return;
-      }
-      try {
-        const pairedDevices = await navigator.bluetooth.getDevices();
-        const deviceNames = pairedDevices
-          .map((device, index) => device?.name || `Paired Device ${index + 1}`)
-          .filter(Boolean);
-
-        if (deviceNames.length === 0) return;
-
-        setKnownBluetoothDevices((prev) =>
-          [...new Set([...deviceNames, ...prev])].slice(0, 10)
-        );
-        setSelectedBluetoothDevice((prev) => prev || deviceNames[0]);
-      } catch (_error) {
-        // Ignore: some browsers block listing paired devices until permission is granted.
-      }
-    }
-
-    loadPreviouslyPairedDevices();
-  }, []);
-
-  useEffect(() => {
     document.body.classList.toggle("theme-dark", themeMode === "dark");
     return () => document.body.classList.remove("theme-dark");
   }, [themeMode]);
+
+  useEffect(() => {
+    function syncInspectionDate() {
+      const today = getTodayIsoDate();
+      setInspectionDate((previous) => (previous === today ? previous : today));
+    }
+
+    syncInspectionDate();
+    const intervalId = setInterval(syncInspectionDate, 60000);
+    return () => clearInterval(intervalId);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function pollLatestSensorReading() {
+      try {
+        const response = await fetch("/api/sensors/latest", {
+          cache: "no-store"
+        });
+        if (!response.ok) return;
+
+        const payload = await response.json();
+        const reading = payload?.reading;
+        if (!reading || !reading.id) return;
+        if (lastSensorReadingIdRef.current === reading.id) return;
+        if (!Number.isFinite(Number(reading.rampAngle)) || !Number.isFinite(Number(reading.doorWidth))) return;
+
+        lastSensorReadingIdRef.current = reading.id;
+        if (cancelled) return;
+
+        const rampAngleValue = Number(reading.rampAngle);
+        const doorWidthValue = Number(reading.doorWidth);
+        const importedEntry = {
+          id: Date.now(),
+          timestamp: new Date(reading.receivedAt || Date.now()).toLocaleString(),
+          format: "BT Bridge",
+          sourceType: "ramp_angle",
+          doorWidth: Number(doorWidthValue.toFixed(2)),
+          rampAngle: Number(rampAngleValue.toFixed(2)),
+          slopeRatio: Number(calculateSlopeRatio(rampAngleValue).toFixed(2))
+        };
+
+        setImportedReadings((prev) => [importedEntry, ...prev].slice(0, 30));
+        setDoorWidth(importedEntry.doorWidth);
+        setRampAngle(importedEntry.rampAngle);
+        setLastRefreshedAt(importedEntry.timestamp);
+      } catch (_error) {
+        // Ignore polling errors so local/offline mode still works.
+      }
+    }
+
+    pollLatestSensorReading();
+    const intervalId = setInterval(pollLatestSensorReading, 2500);
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, []);
 
   useEffect(() => {
     cloudStateLoadedRef.current = false;
@@ -537,11 +536,7 @@ export default function App() {
     minDoorWidth,
     doorWidth,
     rampAngle,
-    knownBluetoothDevices,
-    selectedBluetoothDevice,
     themeMode,
-    aiSummaryEnabled,
-    aiVerbosity,
     lastRefreshedAt,
     reportText,
     summaryText,
@@ -550,18 +545,8 @@ export default function App() {
     logs,
     importedReadings,
     websiteUrl,
-    websiteReportText,
     selectedInspectionId
   ]);
-
-  const selectedSavedInspection = useMemo(() => {
-    return savedWebsiteInspections.find((item) => item.id === selectedInspectionId) || null;
-  }, [savedWebsiteInspections, selectedInspectionId]);
-  const remediationPrioritySites = useMemo(() => {
-    return [...savedWebsiteInspections]
-      .sort((a, b) => (b.counts?.violations || 0) - (a.counts?.violations || 0))
-      .slice(0, 10);
-  }, [savedWebsiteInspections]);
 
   function normalizeNumber(value, fallbackValue) {
     const numeric = Number(value);
@@ -580,29 +565,17 @@ export default function App() {
       if (typeof data.activeMenu === "string") setActiveMenu(data.activeMenu);
       if (typeof data.buildingName === "string") setBuildingName(data.buildingName);
       if (typeof data.inspectorName === "string") setInspectorName(data.inspectorName);
-      if (typeof data.inspectionDate === "string") setInspectionDate(data.inspectionDate);
+      setInspectionDate(getTodayIsoDate());
 
       setMinSlopeRatio(normalizeNumber(data.minSlopeRatio, 12));
       setMinDoorWidth(normalizeNumber(data.minDoorWidth, 32));
       setDoorWidth(normalizeNumber(data.doorWidth, 29));
       setRampAngle(normalizeNumber(data.rampAngle, 6.2));
-
-      if (Array.isArray(data.knownBluetoothDevices)) {
-        setKnownBluetoothDevices(data.knownBluetoothDevices.slice(0, 10));
-      }
-      if (typeof data.selectedBluetoothDevice === "string") {
-        setSelectedBluetoothDevice(data.selectedBluetoothDevice);
-      }
       if (typeof data.themeMode === "string") setThemeMode(data.themeMode);
-
-      if (typeof data.aiSummaryEnabled === "boolean") {
-        setAiSummaryEnabled(data.aiSummaryEnabled);
-      }
-      if (typeof data.aiVerbosity === "string") {
-        setAiVerbosity(data.aiVerbosity);
-      }
       if (typeof data.lastRefreshedAt === "string") setLastRefreshedAt(data.lastRefreshedAt);
-      if (typeof data.reportText === "string") setReportText(data.reportText);
+      if (typeof data.reportText === "string") {
+        setReportText(sanitizeLegacyReportText(data.reportText));
+      }
       if (typeof data.summaryText === "string") setSummaryText(data.summaryText);
       if (typeof data.reportNotes === "string") setReportNotes(data.reportNotes);
 
@@ -616,7 +589,6 @@ export default function App() {
         setImportedReadings(data.importedReadings.slice(0, 30));
       }
       if (typeof data.websiteUrl === "string") setWebsiteUrl(data.websiteUrl);
-      if (typeof data.websiteReportText === "string") setWebsiteReportText(data.websiteReportText);
       if (typeof data.selectedInspectionId === "string") {
         setSelectedInspectionId(data.selectedInspectionId);
       }
@@ -643,20 +615,15 @@ export default function App() {
           minDoorWidth,
           doorWidth,
           rampAngle,
-          knownBluetoothDevices: knownBluetoothDevices.slice(0, 10),
-          selectedBluetoothDevice,
           themeMode,
-          aiSummaryEnabled,
-          aiVerbosity,
           lastRefreshedAt,
-          reportText,
+          reportText: sanitizeLegacyReportText(reportText),
           summaryText,
           reportNotes,
           compiledMeasurements: compiledMeasurements.slice(0, 20),
           logs: logs.slice(0, 50),
           importedReadings: importedReadings.slice(0, 30),
           websiteUrl,
-          websiteReportText,
           selectedInspectionId,
           updatedAt: serverTimestamp()
         },
@@ -672,72 +639,7 @@ export default function App() {
     window.location.href = "/login.html";
   }
 
-  async function connectBluetooth() {
-    if (!("bluetooth" in navigator)) {
-      setBluetoothState("Web Bluetooth is not available in this browser.");
-      return;
-    }
-
-    try {
-      setBluetoothLoading(true);
-      setBluetoothState("Connecting...");
-      const device = await navigator.bluetooth.requestDevice({
-        acceptAllDevices: true,
-        optionalServices: ["battery_service"]
-      });
-      const deviceName = device?.name || "Unnamed device";
-      setSelectedBluetoothDevice(deviceName);
-      setKnownBluetoothDevices((prev) =>
-        [deviceName, ...prev.filter((item) => item !== deviceName)].slice(0, 10)
-      );
-      setBluetoothState("Device selected. Ready for your sensor stream.");
-    } catch (error) {
-      setBluetoothState(`Connection canceled: ${error.message}`);
-    } finally {
-      setBluetoothLoading(false);
-    }
-  }
-
-  function runComplianceCheck() {
-    const entry = {
-      id: Date.now(),
-      buildingName,
-      inspectorName,
-      doorWidth: Number(doorWidth),
-      rampAngle: Number(rampAngle),
-      slopeRatio: Number(slopeRatio.toFixed(1)),
-      doorPass,
-      rampPass,
-      overallPass: doorPass && rampPass,
-      timestamp: new Date().toLocaleString()
-    };
-    setLogs((prev) => [entry, ...prev].slice(0, 50));
-  }
-
-  function refreshLatestReadings() {
-    if (logs.length > 0) {
-      const latest = logs[0];
-      setDoorWidth(latest.doorWidth);
-      setRampAngle(latest.rampAngle);
-      setLastRefreshedAt(new Date().toLocaleString());
-      setBluetoothState("Readings refreshed from latest logged measurement.");
-      return;
-    }
-
-    const simulatedDoor = Math.max(24, Number(doorWidth) + (Math.random() * 2 - 1.5));
-    const simulatedAngle = Math.max(2, Number(rampAngle) + (Math.random() * 0.8 - 0.4));
-    setDoorWidth(Number(simulatedDoor.toFixed(1)));
-    setRampAngle(Number(simulatedAngle.toFixed(1)));
-    setLastRefreshedAt(new Date().toLocaleString());
-    setBluetoothState("No saved logs yet. Displaying latest simulated sensor values.");
-  }
-
   async function generateSummary(rawReportOverride, measurementsOverride) {
-    if (!aiSummaryEnabled) {
-      setSummaryText("AI summary is disabled in Settings.");
-      return;
-    }
-
     const measurements =
       measurementsOverride ||
       (compiledMeasurements.length > 0 ? compiledMeasurements : buildReportMeasurements());
@@ -749,7 +651,7 @@ export default function App() {
       measurements,
       minDoorWidth,
       minSlopeRatio,
-      verbosity: aiVerbosity
+      verbosity: "standard"
     });
 
     if (!rawReport.trim()) {
@@ -759,10 +661,19 @@ export default function App() {
 
     try {
       setSummaryLoading(true);
+      const latestMeasurement = measurements[0] || {};
+      const latestDoorWidth = Number(latestMeasurement.doorWidth);
+      const latestRampAngle = Number(latestMeasurement.rampAngle);
+      const latestSlopeRatio = calculateSlopeRatio(latestRampAngle);
       const aiSummary = await generateAiSummary({
         rawReport,
         buildingName,
-        verbosity: aiVerbosity
+        verbosity: "standard",
+        minDoorWidth,
+        minSlopeRatio,
+        latestDoorWidth: Number.isFinite(latestDoorWidth) ? Number(latestDoorWidth.toFixed(2)) : null,
+        latestRampAngle: Number.isFinite(latestRampAngle) ? Number(latestRampAngle.toFixed(2)) : null,
+        latestSlopeRatio: Number.isFinite(latestSlopeRatio) ? Number(latestSlopeRatio.toFixed(2)) : null
       });
       setSummaryText(aiSummary);
     } catch (error) {
@@ -844,10 +755,10 @@ export default function App() {
       };
 
       setImportedReadings((prev) => [importedEntry, ...prev].slice(0, 30));
+      lastSensorReadingIdRef.current = null;
       setDoorWidth(importedEntry.doorWidth);
       setRampAngle(importedEntry.rampAngle);
       setLastRefreshedAt(importedEntry.timestamp);
-      setBluetoothState("Imported payload parsed and applied.");
       setImportSuccess(`Imported ${parsed.sourceFormat} payload successfully.`);
     } catch (error) {
       setImportError(error.message || "Unable to parse payload.");
@@ -865,7 +776,6 @@ export default function App() {
     setDoorWidth(latest.doorWidth);
     setRampAngle(latest.rampAngle);
     setLastRefreshedAt(new Date().toLocaleString());
-    setBluetoothState("Latest imported reading applied to live dashboard.");
     setImportError("");
     setImportSuccess("Latest imported reading applied.");
   }
@@ -873,7 +783,6 @@ export default function App() {
   async function scanWebsiteAccessibility() {
     setWebsiteScanError("");
     setWebsiteScanResult(null);
-    setWebsiteReportText("");
 
     if (!websiteUrl.trim()) {
       setWebsiteScanError("Please enter a website URL.");
@@ -920,7 +829,6 @@ export default function App() {
       }
 
       setWebsiteScanResult(payload);
-      setWebsiteReportText(cleanAiReportText(generateWebsiteFallbackReport(payload)));
     } catch (error) {
       setWebsiteScanError(error.message || "Unable to scan website.");
     } finally {
@@ -928,33 +836,9 @@ export default function App() {
     }
   }
 
-  async function generateWebsiteAiNarrative() {
-    if (!websiteScanResult) {
-      setWebsiteScanError("Run a scan first, then generate the AI report.");
-      return;
-    }
-
-    try {
-      setWebsiteReportLoading(true);
-      setWebsiteScanError("");
-      const aiReport = await generateAiWebsiteReport({
-        url: websiteScanResult.url,
-        counts: websiteScanResult.counts,
-        violations: websiteScanResult.violations || []
-      });
-      setWebsiteReportText(cleanAiReportText(aiReport));
-    } catch (error) {
-      setWebsiteScanError(`AI report fallback: ${error.message}`);
-      setWebsiteReportText(cleanAiReportText(generateWebsiteFallbackReport(websiteScanResult)));
-    } finally {
-      setWebsiteReportLoading(false);
-    }
-  }
-
   async function refreshSavedWebsiteInspections() {
     if (!authUser?.uid) return;
     setLoadingSavedInspections(true);
-    setSaveInspectionError("");
     try {
       const inspectionsRef = collection(db, "users", authUser.uid, "websiteInspections");
       const inspectionsQuery = query(inspectionsRef, orderBy("createdAt", "desc"), limit(200));
@@ -979,42 +863,9 @@ export default function App() {
         setSelectedInspectionId(records[0].id);
       }
     } catch (error) {
-      setSaveInspectionError(`Unable to refresh saved inspections: ${error.message}`);
+      console.error("Unable to refresh saved inspections", error);
     } finally {
       setLoadingSavedInspections(false);
-    }
-  }
-
-  async function saveWebsiteInspectionLog() {
-    if (!authUser?.uid) {
-      setSaveInspectionError("You must be signed in to save inspection logs.");
-      return;
-    }
-    if (!websiteScanResult) {
-      setSaveInspectionError("Run a website scan first.");
-      return;
-    }
-
-    setSaveInspectionError("");
-    setSaveInspectionStatus("");
-    try {
-      const inspectionsRef = collection(db, "users", authUser.uid, "websiteInspections");
-      await addDoc(inspectionsRef, {
-        url: websiteScanResult.url,
-        scannedAt: websiteScanResult.scannedAt,
-        counts: websiteScanResult.counts || {},
-        failedChecks: websiteScanResult.failedChecks || [],
-        passedChecks: websiteScanResult.passedChecks || [],
-        violations: websiteScanResult.violations || [],
-        reportText:
-          cleanAiReportText(websiteReportText) ||
-          cleanAiReportText(generateWebsiteFallbackReport(websiteScanResult)),
-        createdAt: serverTimestamp()
-      });
-      setSaveInspectionStatus("Inspection log saved to Firestore.");
-      await refreshSavedWebsiteInspections();
-    } catch (error) {
-      setSaveInspectionError(`Unable to save inspection log: ${error.message}`);
     }
   }
 
@@ -1054,101 +905,34 @@ export default function App() {
         </header>
 
         {activeMenu === "Overview" && (
-          <>
-            <section className="grid-cards">
-              <article className="stat-card">
-                <p className="stat-title">Saved Scans</p>
-                <p className="stat-value">{savedWebsiteInspections.length}</p>
-                <p className="stat-meta">Website accessibility inspections</p>
-              </article>
-              <article className="stat-card">
-                <p className="stat-title">Needs Remediation</p>
-                <p className="stat-value">
-                  {
-                    savedWebsiteInspections.filter((item) => (item.counts?.violations || 0) > 0)
-                      .length
-                  }
-                </p>
-                <p className="stat-meta">Sites with one or more violations</p>
-              </article>
-            </section>
+          <section className="overview-home">
+            <article className="panel home-hero">
+              <h3>Choose what you want to check</h3>
+              <p>
+                ADA Vision keeps it simple. Pick one path below: physical accessibility checks for
+                ramp and door measurements, or website accessibility checks for ADA-friendly web
+                content.
+              </p>
+            </article>
 
-            <section className="panel-grid">
-              <article className="panel">
-                <h3>Selected Inspection Summary</h3>
-                <p>Pick a saved scan to review key findings.</p>
-                <div className="row">
-                  <select
-                    value={selectedInspectionId}
-                    onChange={(event) => setSelectedInspectionId(event.target.value)}
-                    style={{ minHeight: "42px", minWidth: "300px" }}
-                  >
-                    <option value="">Select saved inspection</option>
-                    {savedWebsiteInspections.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.url} - {item.createdAtLabel}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    className="btn btn-outline"
-                    onClick={refreshSavedWebsiteInspections}
-                    disabled={loadingSavedInspections}
-                  >
-                    {loadingSavedInspections ? "Refreshing..." : "Refresh Saved Data"}
-                  </button>
-                </div>
-                {selectedSavedInspection ? (
-                  <div className="summary-box" style={{ marginTop: "10px" }}>
-                    <strong>{selectedSavedInspection.url}</strong>
-                    {"\n"}Captured: {selectedSavedInspection.createdAtLabel}
-                    {"\n"}Violations: {selectedSavedInspection.counts?.violations || 0}
-                    {"\n"}Passed checks: {selectedSavedInspection.counts?.passes || 0}
-                    {"\n\n"}
-                    {cleanAiReportText(
-                      selectedSavedInspection.reportText || "No narrative saved for this inspection."
-                    )}
-                  </div>
-                ) : (
-                  <p style={{ marginTop: "10px" }}>
-                    No saved selection yet. Save a scan in the Websites tab, then choose it here.
-                  </p>
-                )}
+            <div className="home-grid">
+              <article className="home-card">
+                <h4>Ramp and Door Check</h4>
+                <p>Import sensor readings, review live measurements, and generate the ADA report.</p>
+                <button className="btn btn-primary" onClick={() => setActiveMenu("Import")}>
+                  Open Ramp and Door
+                </button>
               </article>
 
-              <article className="panel">
-                <h3>Top Remediation Priority Sites</h3>
-                <table className="log-table">
-                  <thead>
-                    <tr>
-                      <th>Website</th>
-                      <th>Violations</th>
-                      <th>Passed</th>
-                      <th>Captured</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {remediationPrioritySites.length === 0 ? (
-                      <tr>
-                        <td colSpan="4">No saved website inspections yet.</td>
-                      </tr>
-                    ) : (
-                      remediationPrioritySites.map((item) => (
-                        <tr key={item.id}>
-                          <td>{item.url}</td>
-                          <td className={(item.counts?.violations || 0) > 0 ? "bad" : "ok"}>
-                            {item.counts?.violations || 0}
-                          </td>
-                          <td>{item.counts?.passes || 0}</td>
-                          <td>{item.createdAtLabel}</td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
+              <article className="home-card">
+                <h4>Website Accessibility Check</h4>
+                <p>Scan a website URL and review clear violations and remediation guidance.</p>
+                <button className="btn btn-primary" onClick={() => setActiveMenu("Websites")}>
+                  Open Website Scanner
+                </button>
               </article>
-            </section>
-          </>
+            </div>
+          </section>
         )}
 
         {activeMenu === "Reports" && (
@@ -1159,7 +943,9 @@ export default function App() {
                 This report auto-builds from the latest imported/saved measurements. You do not
                 need to manually enter values here.
               </p>
-              <div className="summary-box">{reportText || "Import data to generate report."}</div>
+              <div className="summary-box">
+                {sanitizeLegacyReportText(reportText) || "Import data to generate report."}
+              </div>
               <div className="row" style={{ marginTop: "10px" }}>
                 <button className="btn btn-outline" onClick={generateReportFromLatestData}>
                   Generate Report
@@ -1181,7 +967,7 @@ export default function App() {
                 <button
                   className="btn btn-primary"
                   onClick={() => generateSummary()}
-                  disabled={!aiSummaryEnabled || summaryLoading}
+                  disabled={summaryLoading}
                 >
                   {summaryLoading ? "Generating..." : "Regenerate AI Summary"}
                 </button>
@@ -1215,20 +1001,16 @@ export default function App() {
                   {importSuccess}
                 </p>
               )}
+              <p className="stat-meta" style={{ marginTop: "10px" }}>
+                Bluetooth is handled by the Python bridge script. This website reads data from the
+                localhost bridge API only.
+              </p>
               <div className="row">
-                <button className="btn btn-outline" onClick={connectBluetooth}>
-                  Connect Bluetooth Device
-                </button>
                 <button className="btn btn-primary" onClick={importMeasurementPayload}>
                   Parse & Save Reading
                 </button>
                 <button className="btn btn-outline" onClick={useLatestImportedReading}>
                   Use Latest Imported
-                </button>
-              </div>
-              <div className="row" style={{ marginTop: "10px" }}>
-                <button className="btn btn-outline" onClick={refreshLatestReadings}>
-                  Refresh Live Dashboard Values
                 </button>
               </div>
             </article>
@@ -1242,7 +1024,7 @@ export default function App() {
                     <th>Format</th>
                     <th>Door</th>
                     <th>Ramp (deg)</th>
-                    <th>Slope</th>
+                    <th>Ramp Ratio (1:X)</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1276,7 +1058,10 @@ export default function App() {
               <div className="settings-grid">
                 <section className="settings-section">
                   <h4>Inspection Profile</h4>
-                  <p className="settings-helper">Basic report identity fields shown in generated reports.</p>
+                  <p className="settings-helper">
+                    Basic report identity fields shown in generated reports. Inspection date auto-updates
+                    to today's date.
+                  </p>
                   <div className="row">
                     <label className="input-label">
                       Building Name
@@ -1310,7 +1095,7 @@ export default function App() {
                 <section className="settings-section">
                   <h4>ADA Thresholds</h4>
                   <p className="settings-helper">
-                    These are the compliance cutoffs used in pass/fail checks.
+                    Clear pass/fail rules used across reports and AI summaries.
                   </p>
                   <div className="row">
                     <label className="input-label">
@@ -1337,40 +1122,10 @@ export default function App() {
                     </label>
                   </div>
                   <p className="stat-meta">
-                    Example: <strong>1:12</strong> means for every 12 inches of run, ramp rises 1 inch.
-                    Door width should typically be at least <strong>32 in</strong>.
+                    Ramp acceptance: pass when ratio is <strong>1:{minSlopeRatio}</strong> or flatter
+                    (higher X is flatter). Fail if steeper than that. Door acceptance: pass when width
+                    is <strong>{minDoorWidth} in</strong> or wider; fail if under that value.
                   </p>
-                </section>
-
-                <section className="settings-section">
-                  <h4>Bluetooth Device</h4>
-                  <p className="settings-helper">Choose the previously paired sensor source for imports.</p>
-                  <div className="row settings-device-row">
-                    <label className="input-label">
-                      Device
-                      <select
-                        value={selectedBluetoothDevice}
-                        onChange={(event) => setSelectedBluetoothDevice(event.target.value)}
-                      >
-                        <option value="">
-                          {knownBluetoothDevices.length > 0 ? "Select device" : "No paired devices yet"}
-                        </option>
-                        {knownBluetoothDevices.map((deviceName) => (
-                          <option key={deviceName} value={deviceName}>
-                            {deviceName}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <button
-                      className="btn btn-outline settings-device-btn"
-                      onClick={connectBluetooth}
-                      disabled={bluetoothLoading}
-                    >
-                      {bluetoothLoading ? "Pairing..." : "Add Device"}
-                    </button>
-                  </div>
-                  <p className="stat-meta">Selected device: {selectedBluetoothDevice || "None selected"}</p>
                 </section>
 
                 <section className="settings-section">
@@ -1422,22 +1177,8 @@ export default function App() {
                     <span className="badge">Violations: {websiteScanResult.counts?.violations ?? 0}</span>
                     <span className="badge">Passes: {websiteScanResult.counts?.passes ?? 0}</span>
                   </div>
-                  <div className="row" style={{ marginTop: "10px" }}>
-                    <button
-                      className="btn btn-outline"
-                      onClick={generateWebsiteAiNarrative}
-                      disabled={websiteReportLoading}
-                    >
-                      {websiteReportLoading ? "Generating Detailed Report..." : "Generate Detailed AI Report"}
-                    </button>
-                    <button className="btn btn-primary" onClick={saveWebsiteInspectionLog}>
-                      Save Inspection Log
-                    </button>
-                  </div>
                   <div className="website-report-grid" style={{ marginTop: "10px" }}>
-                    {parseWebsiteReportSections(
-                      websiteReportText || generateWebsiteFallbackReport(websiteScanResult)
-                    ).map((section) => (
+                    {parseWebsiteReportSections(generateWebsiteFallbackReport(websiteScanResult)).map((section) => (
                       <article key={section.title} className="report-card">
                         <h4>{section.title}</h4>
                         <p>{section.content}</p>

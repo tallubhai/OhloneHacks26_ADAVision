@@ -1,30 +1,53 @@
 async function postAiRequest(path, body) {
-  const response = await fetch(path, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(body)
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
 
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const details = payload?.details ? ` ${payload.details}` : "";
-    throw new Error(`${payload?.error || "AI request failed."}${details}`);
+  try {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const details = payload?.details ? ` ${payload.details}` : "";
+      throw new Error(`${payload?.error || "AI request failed."}${details}`);
+    }
+
+    return String(payload?.text || "").trim();
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("AI request timed out after 30 seconds.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
   }
-
-  return String(payload?.text || "").trim();
 }
 
 export async function generateAiSummary({
   rawReport,
   buildingName,
-  verbosity = "standard"
+  verbosity = "standard",
+  minDoorWidth,
+  minSlopeRatio,
+  latestDoorWidth,
+  latestRampAngle,
+  latestSlopeRatio
 }) {
   const text = await postAiRequest("/api/ai/summary", {
     rawReport,
     buildingName,
-    verbosity
+    verbosity,
+    minDoorWidth,
+    minSlopeRatio,
+    latestDoorWidth,
+    latestRampAngle,
+    latestSlopeRatio
   });
   return `Summary:\n${text || "Summary unavailable."}`;
 }

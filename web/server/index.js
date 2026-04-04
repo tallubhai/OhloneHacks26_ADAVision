@@ -8,7 +8,8 @@ const port = 8787;
 const require = createRequire(import.meta.url);
 const axeScriptPath = require.resolve("axe-core/axe.min.js");
 const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
-const ollamaModel = process.env.OLLAMA_MODEL || "llama3.2:3b";
+const ollamaModel = process.env.OLLAMA_MODEL || "qwen2.5:0.5b";
+let latestSensorReading = null;
 
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
@@ -49,6 +50,8 @@ app.get("/api/health", (_req, res) => {
 });
 
 async function runOllamaPrompt(prompt) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 45000);
   try {
     const response = await fetch(`${ollamaBaseUrl}/api/generate`, {
       method: "POST",
@@ -62,7 +65,8 @@ async function runOllamaPrompt(prompt) {
         options: {
           temperature: 0.2
         }
-      })
+      }),
+      signal: controller.signal
     });
 
     if (!response.ok) {
@@ -73,20 +77,50 @@ async function runOllamaPrompt(prompt) {
     const data = await response.json();
     return String(data.response || "").trim();
   } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("Ollama request timed out after 45 seconds.");
+    }
     if (error?.cause?.code === "ECONNREFUSED" || String(error.message || "").includes("fetch failed")) {
       throw new Error(
-        "Cannot reach Ollama at http://127.0.0.1:11434. Start Ollama app and run: ollama pull llama3.2:3b"
+        `Cannot reach Ollama at ${ollamaBaseUrl}. Start Ollama app and run: ollama pull ${ollamaModel}`
       );
     }
     throw error;
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
 app.post("/api/ai/summary", async (req, res) => {
-  const { rawReport, buildingName, verbosity = "standard" } = req.body ?? {};
+  const {
+    rawReport,
+    buildingName,
+    verbosity = "standard",
+    minDoorWidth,
+    minSlopeRatio,
+    latestDoorWidth,
+    latestRampAngle,
+    latestSlopeRatio
+  } = req.body ?? {};
   if (!rawReport || typeof rawReport !== "string") {
     return res.status(400).json({ error: "rawReport is required." });
   }
+
+  const toNumberOrNull = (value) => {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
+  };
+
+  const ruleDoorWidth = toNumberOrNull(minDoorWidth);
+  const ruleSlopeRatio = toNumberOrNull(minSlopeRatio);
+  const observedDoorWidth = toNumberOrNull(latestDoorWidth);
+  const observedRampAngle = toNumberOrNull(latestRampAngle);
+  const observedSlopeRatio = toNumberOrNull(latestSlopeRatio);
+
+  const doorPass =
+    ruleDoorWidth != null && observedDoorWidth != null ? observedDoorWidth >= ruleDoorWidth : null;
+  const rampPass =
+    ruleSlopeRatio != null && observedSlopeRatio != null ? observedSlopeRatio >= ruleSlopeRatio : null;
 
   const verbosityGuide =
     verbosity === "concise"
@@ -96,10 +130,23 @@ app.post("/api/ai/summary", async (req, res) => {
         : "Use 3-4 sentences in plain English.";
 
   const prompt = `You are an ADA compliance assistant.
-Summarize the inspection report into plain English.
+Summarize the inspection report into plain English for a student demo.
 ${verbosityGuide}
-Mention pass/fail status for ramp and door, and next action if non-compliant.
+CRITICAL RULES:
+- Door compliance rule: PASS if door width >= minimum door width; FAIL if door width is below minimum.
+- Ramp compliance rule: PASS if ramp ratio (run:rise, 1:X) is >= minimum ratio; FAIL if ratio is below minimum.
+- Do not contradict the numeric facts provided below.
+- If either check fails, clearly say "Non-compliant".
+- If both checks pass, clearly say "Compliant".
+
 Building: ${buildingName || "Unknown building"}
+Minimum door width (in): ${ruleDoorWidth ?? "unknown"}
+Minimum ramp ratio (1:X): ${ruleSlopeRatio ?? "unknown"}
+Observed door width (in): ${observedDoorWidth ?? "unknown"}
+Observed ramp angle (deg): ${observedRampAngle ?? "unknown"}
+Observed ramp ratio (1:X): ${observedSlopeRatio ?? "unknown"}
+Computed door result: ${doorPass == null ? "unknown" : doorPass ? "PASS" : "FAIL"}
+Computed ramp result: ${rampPass == null ? "unknown" : rampPass ? "PASS" : "FAIL"}
 
 Report:
 ${rawReport}`;
@@ -145,6 +192,52 @@ Violations: ${JSON.stringify(Array.isArray(violations) ? violations.slice(0, 15)
       details: error.message
     });
   }
+});
+
+app.post("/api/sensors/ingest", (req, res) => {
+  const { ramp_angle: rampAngleRaw, door_width: doorWidthRaw, source = "bluetooth-bridge", raw } = req.body ?? {};
+
+  const rampAngle = Number(rampAngleRaw);
+  const doorWidth = Number(doorWidthRaw);
+
+  if (!Number.isFinite(rampAngle) || !Number.isFinite(doorWidth)) {
+    return res.status(400).json({
+      error: "Invalid payload. Expected numeric ramp_angle and door_width."
+    });
+  }
+
+  if (rampAngle <= 0 || rampAngle >= 89.9) {
+    return res.status(400).json({
+      error: "ramp_angle must be between 0 and 89.9 degrees."
+    });
+  }
+
+  if (doorWidth <= 0) {
+    return res.status(400).json({
+      error: "door_width must be positive."
+    });
+  }
+
+  latestSensorReading = {
+    id: Date.now(),
+    receivedAt: new Date().toISOString(),
+    rampAngle: Number(rampAngle.toFixed(2)),
+    doorWidth: Number(doorWidth.toFixed(2)),
+    source: String(source),
+    raw: typeof raw === "string" ? raw : ""
+  };
+
+  return res.json({
+    ok: true,
+    reading: latestSensorReading
+  });
+});
+
+app.get("/api/sensors/latest", (_req, res) => {
+  return res.json({
+    ok: true,
+    reading: latestSensorReading
+  });
 });
 
 app.post("/api/websites/scan", async (req, res) => {
