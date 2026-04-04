@@ -3,6 +3,7 @@ import { onAuthStateChanged } from "firebase/auth";
 import {
   addDoc,
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -479,6 +480,23 @@ function buildDetailedChecks(scanResult) {
   return [...failed, ...advisory, ...passed, ...incomplete, ...inapplicable];
 }
 
+function buildDetailCheckKey(item) {
+  return `${String(item?.status || "unknown")}::${String(item?.id || "")}::${String(item?.help || "")}`;
+}
+
+function parseSingleCheckExplanation(aiText) {
+  const firstLine = String(aiText || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => Boolean(line));
+  if (!firstLine) return "AI explanation unavailable.";
+  const parts = firstLine.split("|");
+  if (parts.length >= 4) {
+    return parts.slice(3).join("|").trim() || "AI explanation unavailable.";
+  }
+  return firstLine;
+}
+
 function generateWebsiteFallbackReport(scanResult) {
   const violations = scanResult?.violations || [];
   const counts = scanResult?.counts || {};
@@ -619,12 +637,17 @@ export default function App() {
   const [websiteScanViewTab, setWebsiteScanViewTab] = useState("summary");
   const [websiteDetailedAiLoading, setWebsiteDetailedAiLoading] = useState(false);
   const [websiteDetailedAiText, setWebsiteDetailedAiText] = useState("");
+  const [websiteDetailCheckAiLoadingKey, setWebsiteDetailCheckAiLoadingKey] = useState("");
+  const [websiteDetailCheckAiByKey, setWebsiteDetailCheckAiByKey] = useState({});
+  const [expandedWebsiteDetailCheckKeys, setExpandedWebsiteDetailCheckKeys] = useState([]);
   const [savedWebsiteInspections, setSavedWebsiteInspections] = useState([]);
   const [selectedInspectionId, setSelectedInspectionId] = useState("");
   const [selectedReportCaseIds, setSelectedReportCaseIds] = useState([]);
   const [loadingSavedInspections, setLoadingSavedInspections] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsSaveMessage, setSettingsSaveMessage] = useState("");
+  const [deletingAllData, setDeletingAllData] = useState(false);
+  const [settingsDangerMessage, setSettingsDangerMessage] = useState("");
   const [cloudStateReady, setCloudStateReady] = useState(false);
   const cloudStateLoadedRef = useRef(false);
   /** Dedupes Bluetooth ingest: same `reading.id` from `/api/sensors/latest` is applied once. */
@@ -856,9 +879,18 @@ export default function App() {
   ]);
 
   useEffect(() => {
-    if (!settingsSaveMessage) return;
+    if (!settingsSaveMessage && !settingsDangerMessage) return;
     setSettingsSaveMessage("");
-  }, [buildingName, inspectorName, minSlopeRatio, minDoorWidth, minDoorHeight, minPathwayWidth, themeMode]);
+    setSettingsDangerMessage("");
+  }, [
+    buildingName,
+    inspectorName,
+    minSlopeRatio,
+    minDoorWidth,
+    minDoorHeight,
+    minPathwayWidth,
+    themeMode
+  ]);
 
   function normalizeNumber(value, fallbackValue) {
     const numeric = Number(value);
@@ -970,6 +1002,89 @@ export default function App() {
       return;
     }
     setSettingsSaveMessage("Unable to save settings. Check Firestore rules/connection.");
+  }
+
+  async function toggleDetailCheckExplanation(check) {
+    const key = buildDetailCheckKey(check);
+    const isExpanded = expandedWebsiteDetailCheckKeys.includes(key);
+    if (isExpanded) {
+      setExpandedWebsiteDetailCheckKeys((prev) => prev.filter((item) => item !== key));
+      return;
+    }
+
+    setExpandedWebsiteDetailCheckKeys((prev) => [...prev, key]);
+    if (websiteDetailCheckAiByKey[key]) return;
+
+    try {
+      setWebsiteDetailCheckAiLoadingKey(key);
+      setWebsiteScanError("");
+      const text = await generateAiWebsiteDetailedReport({
+        url: websiteScanResult?.url || websiteUrl,
+        checks: [
+          {
+            id: String(check?.id || ""),
+            status: String(check?.status || "unknown"),
+            impact: String(check?.impact || "none"),
+            help: String(check?.help || ""),
+            description: String(check?.description || ""),
+            affectedElements: Number(check?.affectedElements || 0)
+          }
+        ]
+      });
+      setWebsiteDetailCheckAiByKey((prev) => ({
+        ...prev,
+        [key]: parseSingleCheckExplanation(text)
+      }));
+    } catch (error) {
+      setWebsiteDetailCheckAiByKey((prev) => ({
+        ...prev,
+        [key]: error?.message || "Unable to generate AI explanation for this test."
+      }));
+    } finally {
+      setWebsiteDetailCheckAiLoadingKey("");
+    }
+  }
+
+  async function handleDeleteAllData() {
+    if (!authUser?.uid) {
+      setSettingsDangerMessage("Sign in required before deleting data.");
+      return;
+    }
+    const confirmed = window.confirm(
+      "Delete ALL saved dashboard and website scan data? This cannot be undone."
+    );
+    if (!confirmed) return;
+
+    try {
+      setDeletingAllData(true);
+      setSettingsDangerMessage("");
+
+      const inspectionsRef = collection(db, "users", authUser.uid, "websiteInspections");
+      const inspectionsSnapshot = await getDocs(inspectionsRef);
+      await Promise.all(inspectionsSnapshot.docs.map((docSnapshot) => deleteDoc(docSnapshot.ref)));
+      await deleteDoc(doc(db, "users", authUser.uid, "dashboardState", "current"));
+
+      localStorage.removeItem("adaVisionLogs");
+      sessionStorage.removeItem("adaVisionImportedReadings");
+      setSavedWebsiteInspections([]);
+      setSelectedInspectionId("");
+      setSelectedReportCaseIds([]);
+      setWebsiteScanResult(null);
+      setWebsiteDetailedAiText("");
+      setWebsiteDetailCheckAiByKey({});
+      setExpandedWebsiteDetailCheckKeys([]);
+      setLogs([]);
+      setImportedReadings([]);
+      setCompiledMeasurements([]);
+      setReportText("");
+      setSummaryText("Import measurements to auto-generate a report and readable summary.");
+
+      setSettingsDangerMessage("All saved data has been deleted.");
+    } catch (error) {
+      setSettingsDangerMessage(error?.message || "Unable to delete data.");
+    } finally {
+      setDeletingAllData(false);
+    }
   }
 
   async function handleLogout() {
@@ -1190,6 +1305,9 @@ export default function App() {
     setWebsiteScanError("");
     setWebsiteScanResult(null);
     setWebsiteDetailedAiText("");
+    setWebsiteDetailCheckAiByKey({});
+    setExpandedWebsiteDetailCheckKeys([]);
+    setWebsiteDetailCheckAiLoadingKey("");
 
     if (!websiteUrl.trim()) {
       setWebsiteScanError("Please enter a website URL.");
@@ -1956,7 +2074,7 @@ export default function App() {
                       <input
                         type="text"
                         value={inspectorName}
-                        onChange={(event) => setInspectorName(sanitizeInspectorName(event.target.value))}
+                        onChange={(event) => setInspectorName(event.target.value)}
                         placeholder="e.g., Omar M."
                       />
                     </label>
@@ -2044,6 +2162,18 @@ export default function App() {
                 </button>
                 {settingsSaveMessage ? <span className="stat-meta">{settingsSaveMessage}</span> : null}
               </div>
+              <section className="settings-section" style={{ marginTop: "14px", borderColor: "#f3b9b9" }}>
+                <h4>Danger Zone</h4>
+                <p className="settings-helper">
+                  Permanently delete all saved dashboard state and website scan cases for this account.
+                </p>
+                <div className="row">
+                  <button className="btn btn-outline" onClick={handleDeleteAllData} disabled={deletingAllData}>
+                    {deletingAllData ? "Deleting All Data..." : "Delete All Data"}
+                  </button>
+                  {settingsDangerMessage ? <span className="stat-meta">{settingsDangerMessage}</span> : null}
+                </div>
+              </section>
             </article>
           </section>
         )}
@@ -2169,11 +2299,23 @@ export default function App() {
                                 <td colSpan="5">No detailed checks returned.</td>
                               </tr>
                             ) : (
-                              detailChecks.map((item) => {
+                              detailChecks.flatMap((item) => {
                                 const statusUi = formatCheckStatus(item.status);
-                                return (
-                                  <tr key={`${item.status}-${item.id}-${item.help}`}>
-                                    <td>{humanizeRuleId(item.id)}</td>
+                                const key = buildDetailCheckKey(item);
+                                const isExpanded = expandedWebsiteDetailCheckKeys.includes(key);
+                                const aiText = websiteDetailCheckAiByKey[key];
+                                const isLoading = websiteDetailCheckAiLoadingKey === key;
+                                return [
+                                  <tr key={`row-${key}`}>
+                                    <td>
+                                      <button
+                                        className="btn btn-outline"
+                                        onClick={() => toggleDetailCheckExplanation(item)}
+                                        disabled={isLoading}
+                                      >
+                                        {humanizeRuleId(item.id)}
+                                      </button>
+                                    </td>
                                     <td>
                                       <span className={`metric-result ${statusUi.className}`}>
                                         {statusUi.label}
@@ -2182,8 +2324,28 @@ export default function App() {
                                     <td>{String(item.impact || "none").toUpperCase()}</td>
                                     <td>{item.affectedElements ?? 0}</td>
                                     <td>{item.id}</td>
-                                  </tr>
-                                );
+                                  </tr>,
+                                  isExpanded ? (
+                                    <tr key={`expanded-${key}`}>
+                                      <td colSpan="5">
+                                        <div className="summary-box" style={{ margin: "6px 0" }}>
+                                          <p style={{ marginBottom: "8px" }}>
+                                            {isLoading
+                                              ? "Generating AI explanation..."
+                                              : aiText || "Click below to generate an AI explanation for this test."}
+                                          </p>
+                                          <button
+                                            className="btn btn-outline"
+                                            onClick={() => toggleDetailCheckExplanation(item)}
+                                            disabled={isLoading}
+                                          >
+                                            {isLoading ? "Generating..." : "Refresh AI Explanation"}
+                                          </button>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  ) : null
+                                ];
                               })
                             )}
                           </tbody>
