@@ -2,12 +2,197 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isNumber(value) {
+      return value is int || value is float;
+    }
+
+    function isNonNegativeNumber(value) {
+      return isNumber(value) && value >= 0;
+    }
+
+    function validCountsMap(counts) {
+      return counts is map
+        && counts.keys().hasOnly(["violations", "passes", "incomplete", "inapplicable"])
+        && (!("violations" in counts) || isNonNegativeNumber(counts.violations))
+        && (!("passes" in counts) || isNonNegativeNumber(counts.passes))
+        && (!("incomplete" in counts) || isNonNegativeNumber(counts.incomplete))
+        && (!("inapplicable" in counts) || isNonNegativeNumber(counts.inapplicable));
+    }
+
+    function validWebsiteInspectionCreate(data) {
+      return data.keys().hasOnly([
+          "url",
+          "scannedAt",
+          "counts",
+          "violations",
+          "failedChecks",
+          "passedChecks",
+          "reportText",
+          "createdAt"
+        ])
+        && data.url is string
+        && data.url.size() > 0
+        && data.url.size() <= 2048
+        && data.scannedAt is string
+        && data.scannedAt.size() > 0
+        && data.scannedAt.size() <= 80
+        && validCountsMap(data.counts)
+        && data.violations is list
+        && data.failedChecks is list
+        && data.passedChecks is list
+        && data.violations.size() <= 300
+        && data.failedChecks.size() <= 300
+        && data.passedChecks.size() <= 300
+        && data.reportText is string
+        && data.reportText.size() <= 12000
+        && data.createdAt is timestamp;
+    }
+
+    function validWebsiteInspectionUpdate() {
+      let changed = request.resource.data.diff(resource.data).affectedKeys();
+      return changed.hasOnly([
+          "url",
+          "scannedAt",
+          "counts",
+          "violations",
+          "failedChecks",
+          "passedChecks",
+          "reportText"
+        ])
+        && (!("url" in changed) || (request.resource.data.url is string
+          && request.resource.data.url.size() > 0
+          && request.resource.data.url.size() <= 2048))
+        && (!("scannedAt" in changed) || (request.resource.data.scannedAt is string
+          && request.resource.data.scannedAt.size() > 0
+          && request.resource.data.scannedAt.size() <= 80))
+        && (!("counts" in changed) || validCountsMap(request.resource.data.counts))
+        && (!("violations" in changed) || (request.resource.data.violations is list
+          && request.resource.data.violations.size() <= 300))
+        && (!("failedChecks" in changed) || (request.resource.data.failedChecks is list
+          && request.resource.data.failedChecks.size() <= 300))
+        && (!("passedChecks" in changed) || (request.resource.data.passedChecks is list
+          && request.resource.data.passedChecks.size() <= 300))
+        && (!("reportText" in changed) || (request.resource.data.reportText is string
+          && request.resource.data.reportText.size() <= 12000));
+    }
+
+    function validDashboardStateCreate(data) {
+      return data.keys().hasOnly([
+          "activeMenu",
+          "buildingName",
+          "inspectorName",
+          "inspectionDate",
+          "minSlopeRatio",
+          "minDoorWidth",
+          "minDoorHeight",
+          "minPathwayWidth",
+          "doorWidth",
+          "rampAngle",
+          "themeMode",
+          "lastRefreshedAt",
+          "reportText",
+          "summaryText",
+          "reportNotes",
+          "compiledMeasurements",
+          "logs",
+          "importedReadings",
+          "websiteUrl",
+          "selectedInspectionId",
+          "updatedAt"
+        ])
+        && (!("activeMenu" in data) || (data.activeMenu is string && data.activeMenu.size() <= 40))
+        && (!("buildingName" in data) || (data.buildingName is string && data.buildingName.size() <= 120))
+        && (!("inspectorName" in data) || (data.inspectorName is string && data.inspectorName.size() <= 120))
+        && (!("inspectionDate" in data) || (data.inspectionDate is string && data.inspectionDate.size() <= 20))
+        && (!("minSlopeRatio" in data) || isNonNegativeNumber(data.minSlopeRatio))
+        && (!("minDoorWidth" in data) || isNonNegativeNumber(data.minDoorWidth))
+        && (!("minDoorHeight" in data) || isNonNegativeNumber(data.minDoorHeight))
+        && (!("minPathwayWidth" in data) || isNonNegativeNumber(data.minPathwayWidth))
+        && (!("doorWidth" in data) || isNonNegativeNumber(data.doorWidth))
+        && (!("rampAngle" in data) || isNonNegativeNumber(data.rampAngle))
+        && (!("themeMode" in data) || (data.themeMode is string && data.themeMode.size() <= 20))
+        && (!("lastRefreshedAt" in data) || (data.lastRefreshedAt is string && data.lastRefreshedAt.size() <= 80))
+        && (!("reportText" in data) || (data.reportText is string && data.reportText.size() <= 20000))
+        && (!("summaryText" in data) || (data.summaryText is string && data.summaryText.size() <= 12000))
+        && (!("reportNotes" in data) || (data.reportNotes is string && data.reportNotes.size() <= 12000))
+        && (!("compiledMeasurements" in data) || (data.compiledMeasurements is list && data.compiledMeasurements.size() <= 20))
+        && (!("logs" in data) || (data.logs is list && data.logs.size() <= 50))
+        && (!("importedReadings" in data) || (data.importedReadings is list && data.importedReadings.size() <= 30))
+        && (!("websiteUrl" in data) || (data.websiteUrl is string && data.websiteUrl.size() <= 2048))
+        && (!("selectedInspectionId" in data) || (data.selectedInspectionId is string && data.selectedInspectionId.size() <= 120))
+        && (!("updatedAt" in data) || data.updatedAt is timestamp);
+    }
+
+    function validDashboardStateUpdate() {
+      let changed = request.resource.data.diff(resource.data).affectedKeys();
+      return changed.hasOnly([
+          "activeMenu",
+          "buildingName",
+          "inspectorName",
+          "inspectionDate",
+          "minSlopeRatio",
+          "minDoorWidth",
+          "minDoorHeight",
+          "minPathwayWidth",
+          "doorWidth",
+          "rampAngle",
+          "themeMode",
+          "lastRefreshedAt",
+          "reportText",
+          "summaryText",
+          "reportNotes",
+          "compiledMeasurements",
+          "logs",
+          "importedReadings",
+          "websiteUrl",
+          "selectedInspectionId",
+          "updatedAt"
+        ])
+        && (!("activeMenu" in changed) || (request.resource.data.activeMenu is string && request.resource.data.activeMenu.size() <= 40))
+        && (!("buildingName" in changed) || (request.resource.data.buildingName is string && request.resource.data.buildingName.size() <= 120))
+        && (!("inspectorName" in changed) || (request.resource.data.inspectorName is string && request.resource.data.inspectorName.size() <= 120))
+        && (!("inspectionDate" in changed) || (request.resource.data.inspectionDate is string && request.resource.data.inspectionDate.size() <= 20))
+        && (!("minSlopeRatio" in changed) || isNonNegativeNumber(request.resource.data.minSlopeRatio))
+        && (!("minDoorWidth" in changed) || isNonNegativeNumber(request.resource.data.minDoorWidth))
+        && (!("minDoorHeight" in changed) || isNonNegativeNumber(request.resource.data.minDoorHeight))
+        && (!("minPathwayWidth" in changed) || isNonNegativeNumber(request.resource.data.minPathwayWidth))
+        && (!("doorWidth" in changed) || isNonNegativeNumber(request.resource.data.doorWidth))
+        && (!("rampAngle" in changed) || isNonNegativeNumber(request.resource.data.rampAngle))
+        && (!("themeMode" in changed) || (request.resource.data.themeMode is string && request.resource.data.themeMode.size() <= 20))
+        && (!("lastRefreshedAt" in changed) || (request.resource.data.lastRefreshedAt is string && request.resource.data.lastRefreshedAt.size() <= 80))
+        && (!("reportText" in changed) || (request.resource.data.reportText is string && request.resource.data.reportText.size() <= 20000))
+        && (!("summaryText" in changed) || (request.resource.data.summaryText is string && request.resource.data.summaryText.size() <= 12000))
+        && (!("reportNotes" in changed) || (request.resource.data.reportNotes is string && request.resource.data.reportNotes.size() <= 12000))
+        && (!("compiledMeasurements" in changed) || (request.resource.data.compiledMeasurements is list && request.resource.data.compiledMeasurements.size() <= 20))
+        && (!("logs" in changed) || (request.resource.data.logs is list && request.resource.data.logs.size() <= 50))
+        && (!("importedReadings" in changed) || (request.resource.data.importedReadings is list && request.resource.data.importedReadings.size() <= 30))
+        && (!("websiteUrl" in changed) || (request.resource.data.websiteUrl is string && request.resource.data.websiteUrl.size() <= 2048))
+        && (!("selectedInspectionId" in changed) || (request.resource.data.selectedInspectionId is string && request.resource.data.selectedInspectionId.size() <= 120))
+        && (!("updatedAt" in changed) || request.resource.data.updatedAt is timestamp);
+    }
+
     match /users/{userId}/websiteInspections/{inspectionId} {
-      allow read, create, update, delete: if request.auth != null && request.auth.uid == userId;
+      allow read, delete: if isOwner(userId);
+      allow create: if isOwner(userId) && validWebsiteInspectionCreate(request.resource.data);
+      allow update: if isOwner(userId) && validWebsiteInspectionUpdate();
     }
 
     match /users/{userId}/dashboardState/{stateDocId} {
-      allow read, create, update, delete: if request.auth != null && request.auth.uid == userId;
+      allow read, delete: if isOwner(userId);
+      allow create: if isOwner(userId)
+        && stateDocId == "current"
+        && validDashboardStateCreate(request.resource.data);
+      allow update: if isOwner(userId)
+        && stateDocId == "current"
+        && validDashboardStateUpdate();
     }
   }
 }

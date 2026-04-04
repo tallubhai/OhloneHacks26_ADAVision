@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
 import {
+  addDoc,
   collection,
   doc,
   getDoc,
@@ -15,6 +16,19 @@ import { auth, db } from "./firebase";
 import { logout } from "./auth";
 import { generateAiSummary } from "./services/aiSummary";
 
+/**
+ * @file App.jsx (report / threshold / sensor slice)
+ *
+ * Data path for demos (see docs/CODEBASE_GUIDE.md):
+ * 1. Python bridge POSTs to `/api/sensors/ingest` → server stores latest reading.
+ * 2. This app polls `GET /api/sensors/latest` and prepends new rows to `importedReadings`.
+ * 3. `buildReportMeasurements()` merges logs + imports (newest first) for the report.
+ * 4. `generateRawReport` / `buildRawReport` embed thresholds (`minDoorWidth`, `minSlopeRatio`).
+ * 5. `generateSummary` sends that text + the same thresholds and latest numbers to `generateAiSummary`.
+ *
+ * Ramp math: angle θ → tangent → slope ratio 1:X as run:rise, where X = 1/tan(θ). Larger X = flatter ramp.
+ */
+
 const sidebarItems = [
   "Overview",
   "Import",
@@ -23,6 +37,7 @@ const sidebarItems = [
   "Settings"
 ];
 
+/** @returns {string} Local calendar date `YYYY-MM-DD` for inspection date defaults. */
 function getTodayIsoDate() {
   const now = new Date();
   const year = now.getFullYear();
@@ -31,10 +46,46 @@ function getTodayIsoDate() {
   return `${year}-${month}-${day}`;
 }
 
+/**
+ * Door rule: pass when clear width meets or exceeds the configured minimum (typ. 32 in).
+ * @param {number} doorWidthInches Observed width in inches.
+ * @param {number} [minDoorWidth=32] Required minimum width in inches.
+ * @returns {boolean}
+ */
 function evaluateDoor(doorWidthInches, minDoorWidth = 32) {
   return Number(doorWidthInches) >= Number(minDoorWidth);
 }
 
+/**
+ * Door clear height: pass when measured height meets or exceeds minimum. Null = not captured.
+ * @param {number} doorHeightInches
+ * @param {number} [minDoorHeight=80]
+ * @returns {boolean|null}
+ */
+function evaluateDoorHeight(doorHeightInches, minDoorHeight = 80) {
+  const doorHeight = Number(doorHeightInches);
+  if (!Number.isFinite(doorHeight) || doorHeight <= 0) return null;
+  return doorHeight >= Number(minDoorHeight);
+}
+
+/**
+ * Pathway clear width: pass when width meets or exceeds minimum. Null = not captured.
+ * @param {number} pathwayWidthInches
+ * @param {number} [minPathwayWidth=36]
+ * @returns {boolean|null}
+ */
+function evaluatePathwayWidth(pathwayWidthInches, minPathwayWidth = 36) {
+  const pathwayWidth = Number(pathwayWidthInches);
+  if (!Number.isFinite(pathwayWidth) || pathwayWidth <= 0) return null;
+  return pathwayWidth >= Number(minPathwayWidth);
+}
+
+/**
+ * Ramp rule: convert angle to run:rise ratio 1:X; pass when X ≥ minimum (flatter is better).
+ * @param {number} angleDegrees Ramp angle from horizontal, degrees.
+ * @param {number} [minSlopeRatio=12] Minimum acceptable 1:X (e.g. 12 means 1:12 or flatter).
+ * @returns {boolean}
+ */
 function evaluateRamp(angleDegrees, minSlopeRatio = 12) {
   const radians = (Number(angleDegrees) * Math.PI) / 180;
   const tangent = Math.tan(radians);
@@ -47,6 +98,10 @@ function evaluateRamp(angleDegrees, minSlopeRatio = 12) {
   return slopeRatio >= Number(minSlopeRatio);
 }
 
+/**
+ * @param {number} angleDegrees
+ * @returns {number} Run:rise ratio 1:X (0 if angle invalid for tan).
+ */
 function calculateSlopeRatio(angleDegrees) {
   const radians = (Number(angleDegrees) * Math.PI) / 180;
   const tangent = Math.tan(radians);
@@ -56,6 +111,21 @@ function calculateSlopeRatio(angleDegrees) {
   return 1 / tangent;
 }
 
+/**
+ * Build the multi-line inspection string shown in the Reports UI and sent to the AI backend.
+ *
+ * @param {object} opts
+ * @param {string} opts.buildingName
+ * @param {string} opts.inspectorName
+ * @param {string} opts.inspectionDate
+ * @param {string} opts.notes Free-form notes section.
+ * @param {Array<{ doorWidth: number, rampAngle: number, timestamp?: string }>} opts.measurements Newest-first list; index 0 is “latest”.
+ * @param {number} opts.minDoorWidth Threshold (inches).
+ * @param {number} opts.minSlopeRatio Threshold as 1:X.
+ * @param {number} opts.minDoorHeight Minimum clear door height (inches).
+ * @param {number} opts.minPathwayWidth Minimum pathway width (inches).
+ * @returns {string}
+ */
 function generateRawReport({
   buildingName,
   inspectorName,
@@ -63,12 +133,30 @@ function generateRawReport({
   notes,
   measurements,
   minDoorWidth,
-  minSlopeRatio
+  minSlopeRatio,
+  minDoorHeight,
+  minPathwayWidth
 }) {
   const latest = measurements[0];
   const latestDoorPass = evaluateDoor(latest.doorWidth, minDoorWidth);
   const latestRampPass = evaluateRamp(latest.rampAngle, minSlopeRatio);
+  const latestDoorHeightPass = evaluateDoorHeight(latest.doorHeight, minDoorHeight);
+  const latestPathwayPass = evaluatePathwayWidth(latest.pathwayWidth, minPathwayWidth);
   const latestSlope = calculateSlopeRatio(latest.rampAngle);
+  const latestDoorHeightValue = Number(latest.doorHeight);
+  const latestPathwayValue = Number(latest.pathwayWidth);
+  const hasDoorHeight = Number.isFinite(latestDoorHeightValue) && latestDoorHeightValue > 0;
+  const hasPathwayWidth = Number.isFinite(latestPathwayValue) && latestPathwayValue > 0;
+  const doorHeightStatus =
+    latestDoorHeightPass === null ? "Not captured" : latestDoorHeightPass ? "Compliant" : "Non-compliant";
+  const pathwayStatus =
+    latestPathwayPass === null ? "Not captured" : latestPathwayPass ? "Compliant" : "Non-compliant";
+  const doorHeightLabel = hasDoorHeight
+    ? `${latestDoorHeightValue.toFixed(1)} in`
+    : "N/A";
+  const pathwayLabel = hasPathwayWidth
+    ? `${latestPathwayValue.toFixed(1)} in`
+    : "N/A";
 
   return `ADA Inspection Report
 Building: ${buildingName}
@@ -79,54 +167,69 @@ Generated: ${new Date().toLocaleString()}
 Latest Measurement: ${latest.timestamp}
 Ramp Ratio (run:rise): 1:${latestSlope.toFixed(2)} (${latestRampPass ? "Compliant" : "Non-compliant"}; pass if ratio is 1:${minSlopeRatio} or flatter)
 Door Width: ${Number(latest.doorWidth).toFixed(1)} in (${latestDoorPass ? "Compliant" : "Non-compliant"}; pass if width is ${minDoorWidth} in or wider)
+Door Clear Height: ${doorHeightLabel} (${doorHeightStatus}; pass if height is ${minDoorHeight} in or higher)
+Pathway Clear Width: ${pathwayLabel} (${pathwayStatus}; pass if width is ${minPathwayWidth} in or wider)
 
 Notes: ${notes}
 `;
 }
 
-function summarizeReport({ buildingName, measurements, minDoorWidth, minSlopeRatio, verbosity }) {
+/**
+ * Deterministic fallback summary when Ollama is down or the user has not generated AI text yet.
+ * Mirrors pass/fail logic for door width, ramp, door height, and pathway width where captured.
+ *
+ * @param {object} opts
+ * @param {string} opts.buildingName
+ * @param {Array<{ doorWidth: number, rampAngle: number, doorHeight?: number, pathwayWidth?: number }>} opts.measurements
+ * @param {number} opts.minDoorWidth
+ * @param {number} opts.minSlopeRatio
+ * @param {number} opts.minDoorHeight
+ * @param {number} opts.minPathwayWidth
+ * @param {"concise"|"standard"|"detailed"} [opts.verbosity]
+ * @returns {string}
+ */
+function summarizeReport({
+  buildingName,
+  measurements,
+  minDoorWidth,
+  minSlopeRatio,
+  minDoorHeight,
+  minPathwayWidth,
+  verbosity
+}) {
   const latest = measurements[0];
   const latestDoorPass = evaluateDoor(latest.doorWidth, minDoorWidth);
   const latestRampPass = evaluateRamp(latest.rampAngle, minSlopeRatio);
+  const latestDoorHeightPass = evaluateDoorHeight(latest.doorHeight, minDoorHeight);
+  const latestPathwayPass = evaluatePathwayWidth(latest.pathwayWidth, minPathwayWidth);
+  const latestIssues = [];
+  if (!latestDoorPass) latestIssues.push("door width is below minimum");
+  if (!latestRampPass) latestIssues.push("ramp is steeper than allowed");
+  if (latestDoorHeightPass === false) latestIssues.push("door clear height is below minimum");
+  if (latestPathwayPass === false) latestIssues.push("pathway width is below minimum");
+
   const failureCount = measurements.filter(
-    (entry) =>
-      !evaluateDoor(entry.doorWidth, minDoorWidth) ||
-      !evaluateRamp(entry.rampAngle, minSlopeRatio)
+    (entry) => {
+      const doorFail = !evaluateDoor(entry.doorWidth, minDoorWidth);
+      const rampFail = !evaluateRamp(entry.rampAngle, minSlopeRatio);
+      const doorHeightFail = evaluateDoorHeight(entry.doorHeight, minDoorHeight) === false;
+      const pathwayFail = evaluatePathwayWidth(entry.pathwayWidth, minPathwayWidth) === false;
+      return doorFail || rampFail || doorHeightFail || pathwayFail;
+    }
   ).length;
   const failureRate = failureCount / measurements.length;
 
   const severity =
     failureRate === 0 ? "Low" : failureRate > 0.5 ? "High" : "Medium";
 
-  if (!latestDoorPass && !latestRampPass) {
+  if (latestIssues.length > 0) {
+    const issueSentence = latestIssues.join("; ");
     const base = `Summary:
-Ramp is too steep. Door is too narrow. ${buildingName} fails ADA compliance.
+${issueSentence}. ${buildingName} fails ADA compliance.
 Severity: ${severity} (${failureCount}/${measurements.length} recent measurements contain failures).`;
     if (verbosity === "detailed") {
       return `${base}
-Recommended action: increase doorway clearance to at least ${minDoorWidth} in and flatten ramp toward 1:${minSlopeRatio}.`;
-    }
-    return base;
-  }
-
-  if (!latestDoorPass) {
-    const base = `Summary:
-Door is too narrow. Ramp slope is within limit. ${buildingName} fails ADA compliance until doorway width is corrected.
-Severity: ${severity} (${failureCount}/${measurements.length} recent measurements contain failures).`;
-    if (verbosity === "detailed") {
-      return `${base}
-Recommended action: widen clear door width to at least ${minDoorWidth} in.`;
-    }
-    return base;
-  }
-
-  if (!latestRampPass) {
-    const base = `Summary:
-Ramp is too steep. Door width passes minimum requirement. ${buildingName} fails ADA compliance until ramp slope is corrected.
-Severity: ${severity} (${failureCount}/${measurements.length} recent measurements contain failures).`;
-    if (verbosity === "detailed") {
-      return `${base}
-Recommended action: reduce ramp steepness to at most 1:${minSlopeRatio}.`;
+Recommended action: meet all configured thresholds (door width >= ${minDoorWidth} in, ramp ratio >= 1:${minSlopeRatio}, door height >= ${minDoorHeight} in, pathway width >= ${minPathwayWidth} in).`;
     }
     return base;
   }
@@ -144,6 +247,10 @@ Recommendation: continue periodic checks to maintain compliance over time.`;
   return passSummary;
 }
 
+/**
+ * Parse pasted JSON/CSV-like payloads from the Import tab into `{ doorWidth, rampAngle, ... }`.
+ * Not on the main hardware→AI path; kept for manual data entry.
+ */
 function parseImportPayload(rawPayload) {
   const payload = rawPayload.trim();
   if (!payload) {
@@ -166,6 +273,8 @@ function parseImportPayload(rawPayload) {
     }, {});
 
     const door = entries.door_width ?? entries.doorwidth ?? entries.door;
+    const doorHeight = entries.door_height ?? entries.doorheight;
+    const pathwayWidth = entries.pathway_width ?? entries.pathwaywidth ?? entries.path_width;
     const rampAngle = entries.ramp_angle ?? entries.rampangle ?? entries.angle ?? entries.theta;
     const rampSlopeRatio = entries.ramp_slope ?? entries.rampslope ?? entries.slope_ratio;
 
@@ -174,12 +283,29 @@ function parseImportPayload(rawPayload) {
       throw new Error("Door width must be a positive number.");
     }
 
+    const doorHeightInches = doorHeight != null ? toNumber(doorHeight, "Door height") : null;
+    if (doorHeightInches != null && doorHeightInches <= 0) {
+      throw new Error("Door height must be a positive number.");
+    }
+
+    const pathwayWidthInches = pathwayWidth != null ? toNumber(pathwayWidth, "Pathway width") : null;
+    if (pathwayWidthInches != null && pathwayWidthInches <= 0) {
+      throw new Error("Pathway width must be a positive number.");
+    }
+
     if (rampAngle != null) {
       const angleDegrees = toNumber(rampAngle, "Ramp angle");
       if (angleDegrees <= 0 || angleDegrees >= 89.9) {
         throw new Error("Ramp angle must be between 0 and 89.9 degrees.");
       }
-      return { doorWidth, rampAngle: angleDegrees, sourceFormat: "JSON", sourceType: "ramp_angle" };
+      return {
+        doorWidth,
+        rampAngle: angleDegrees,
+        doorHeight: doorHeightInches,
+        pathwayWidth: pathwayWidthInches,
+        sourceFormat: "JSON",
+        sourceType: "ramp_angle"
+      };
     }
 
     if (rampSlopeRatio != null) {
@@ -188,7 +314,14 @@ function parseImportPayload(rawPayload) {
         throw new Error("Ramp slope must be a positive number.");
       }
       const angleDegrees = (Math.atan(1 / ratio) * 180) / Math.PI;
-      return { doorWidth, rampAngle: angleDegrees, sourceFormat: "JSON", sourceType: "ramp_slope" };
+      return {
+        doorWidth,
+        rampAngle: angleDegrees,
+        doorHeight: doorHeightInches,
+        pathwayWidth: pathwayWidthInches,
+        sourceFormat: "JSON",
+        sourceType: "ramp_slope"
+      };
     }
 
     throw new Error("Missing ramp value. Include ramp_angle or ramp_slope.");
@@ -224,8 +357,23 @@ function parseImportPayload(rawPayload) {
   if (rampSlope <= 0 || doorWidth <= 0) {
     throw new Error("CSV values must be positive numbers.");
   }
+  const doorHeight = csvParts.length >= 3 ? toNumber(csvParts[2], "Door height") : null;
+  if (doorHeight != null && doorHeight <= 0) {
+    throw new Error("Door height must be a positive number.");
+  }
+  const pathwayWidth = csvParts.length >= 4 ? toNumber(csvParts[3], "Pathway width") : null;
+  if (pathwayWidth != null && pathwayWidth <= 0) {
+    throw new Error("Pathway width must be a positive number.");
+  }
   const angleDegrees = (Math.atan(1 / rampSlope) * 180) / Math.PI;
-  return { doorWidth, rampAngle: angleDegrees, sourceFormat: "CSV", sourceType: "ramp_slope" };
+  return {
+    doorWidth,
+    rampAngle: angleDegrees,
+    doorHeight,
+    pathwayWidth,
+    sourceFormat: "CSV",
+    sourceType: "ramp_slope"
+  };
 }
 
 function formatImpactClass(impact) {
@@ -317,10 +465,18 @@ function parseWebsiteReportSections(reportText) {
   });
 }
 
+/** Strip deprecated “Recent Measurements” blocks from older saved Firestore reports. */
 function sanitizeLegacyReportText(reportText) {
-  const text = String(reportText || "");
+  const text = String(reportText || "").replace(/Inspector:\s*Bilal Salman/gi, "Inspector: Inspector");
   if (!text.includes("Recent Measurements:")) return text;
   return text.replace(/\nRecent Measurements:\n[\s\S]*?\n\nNotes:/, "\nNotes:");
+}
+
+function sanitizeInspectorName(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) return "Inspector";
+  if (normalized.toLowerCase() === "bilal salman") return "Inspector";
+  return normalized;
 }
 
 export default function App() {
@@ -329,10 +485,12 @@ export default function App() {
   const [authChecking, setAuthChecking] = useState(true);
 
   const [buildingName, setBuildingName] = useState("City Hall");
-  const [inspectorName, setInspectorName] = useState("Bilal Salman");
+  const [inspectorName, setInspectorName] = useState("Inspector");
   const [inspectionDate, setInspectionDate] = useState(getTodayIsoDate());
   const [minSlopeRatio, setMinSlopeRatio] = useState(12);
   const [minDoorWidth, setMinDoorWidth] = useState(32);
+  const [minDoorHeight, setMinDoorHeight] = useState(80);
+  const [minPathwayWidth, setMinPathwayWidth] = useState(36);
   const [doorWidth, setDoorWidth] = useState(29);
   const [rampAngle, setRampAngle] = useState(6.2);
   const [themeMode, setThemeMode] = useState("light");
@@ -358,20 +516,31 @@ export default function App() {
   const [loadingSavedInspections, setLoadingSavedInspections] = useState(false);
   const [cloudStateReady, setCloudStateReady] = useState(false);
   const cloudStateLoadedRef = useRef(false);
+  /** Dedupes Bluetooth ingest: same `reading.id` from `/api/sensors/latest` is applied once. */
   const lastSensorReadingIdRef = useRef(null);
+
+  /**
+   * Measurements fed into report + AI: prefer `logs` and `importedReadings` (includes BT bridge),
+   * sorted newest-first, capped at 20; otherwise a single fallback from manual sliders.
+   * @returns {Array<{ id: number, timestamp: string, doorWidth: number, rampAngle: number }>}
+   */
   function buildReportMeasurements() {
     const sourceMeasurements = [
       ...logs.map((entry) => ({
         id: entry.id,
         timestamp: entry.timestamp,
         doorWidth: Number(entry.doorWidth),
-        rampAngle: Number(entry.rampAngle)
+        rampAngle: Number(entry.rampAngle),
+        doorHeight: Number.isFinite(Number(entry.doorHeight)) ? Number(entry.doorHeight) : null,
+        pathwayWidth: Number.isFinite(Number(entry.pathwayWidth)) ? Number(entry.pathwayWidth) : null
       })),
       ...importedReadings.map((entry) => ({
         id: entry.id,
         timestamp: entry.timestamp,
         doorWidth: Number(entry.doorWidth),
-        rampAngle: Number(entry.rampAngle)
+        rampAngle: Number(entry.rampAngle),
+        doorHeight: Number.isFinite(Number(entry.doorHeight)) ? Number(entry.doorHeight) : null,
+        pathwayWidth: Number.isFinite(Number(entry.pathwayWidth)) ? Number(entry.pathwayWidth) : null
       }))
     ]
       .sort((a, b) => Number(b.id) - Number(a.id))
@@ -381,12 +550,15 @@ export default function App() {
       id: Date.now(),
       timestamp: new Date().toLocaleString(),
       doorWidth: Number(doorWidth),
-      rampAngle: Number(rampAngle)
+      rampAngle: Number(rampAngle),
+      doorHeight: null,
+      pathwayWidth: null
     };
 
     return sourceMeasurements.length > 0 ? sourceMeasurements : [fallbackMeasurement];
   }
 
+  /** @param {Array<{ id: number, timestamp: string, doorWidth: number, rampAngle: number }>} measurements */
   function buildRawReport(measurements) {
     return generateRawReport({
       buildingName,
@@ -395,7 +567,9 @@ export default function App() {
       notes: reportNotes,
       measurements,
       minDoorWidth,
-      minSlopeRatio
+      minSlopeRatio,
+      minDoorHeight,
+      minPathwayWidth
     });
   }
   useEffect(() => {
@@ -461,6 +635,10 @@ export default function App() {
     return () => clearInterval(intervalId);
   }, []);
 
+  /**
+   * Polls the backend for the latest Bluetooth-ingested sample (bridge → `/api/sensors/ingest`).
+   * New readings become import rows and refresh the visible door/ramp fields for the report.
+   */
   useEffect(() => {
     let cancelled = false;
 
@@ -482,6 +660,7 @@ export default function App() {
 
         const rampAngleValue = Number(reading.rampAngle);
         const doorWidthValue = Number(reading.doorWidth);
+        // Treat bridge data like an import row so it flows through the same report pipeline.
         const importedEntry = {
           id: Date.now(),
           timestamp: new Date(reading.receivedAt || Date.now()).toLocaleString(),
@@ -489,6 +668,8 @@ export default function App() {
           sourceType: "ramp_angle",
           doorWidth: Number(doorWidthValue.toFixed(2)),
           rampAngle: Number(rampAngleValue.toFixed(2)),
+          doorHeight: null,
+          pathwayWidth: null,
           slopeRatio: Number(calculateSlopeRatio(rampAngleValue).toFixed(2))
         };
 
@@ -497,7 +678,7 @@ export default function App() {
         setRampAngle(importedEntry.rampAngle);
         setLastRefreshedAt(importedEntry.timestamp);
       } catch (_error) {
-        // Ignore polling errors so local/offline mode still works.
+        // No backend / CORS / network: keep UI usable with manual or cached values.
       }
     }
 
@@ -534,6 +715,8 @@ export default function App() {
     inspectionDate,
     minSlopeRatio,
     minDoorWidth,
+    minDoorHeight,
+    minPathwayWidth,
     doorWidth,
     rampAngle,
     themeMode,
@@ -564,11 +747,15 @@ export default function App() {
       const data = snapshot.data() || {};
       if (typeof data.activeMenu === "string") setActiveMenu(data.activeMenu);
       if (typeof data.buildingName === "string") setBuildingName(data.buildingName);
-      if (typeof data.inspectorName === "string") setInspectorName(data.inspectorName);
+      if (typeof data.inspectorName === "string") {
+        setInspectorName(sanitizeInspectorName(data.inspectorName));
+      }
       setInspectionDate(getTodayIsoDate());
 
       setMinSlopeRatio(normalizeNumber(data.minSlopeRatio, 12));
       setMinDoorWidth(normalizeNumber(data.minDoorWidth, 32));
+      setMinDoorHeight(normalizeNumber(data.minDoorHeight, 80));
+      setMinPathwayWidth(normalizeNumber(data.minPathwayWidth, 36));
       setDoorWidth(normalizeNumber(data.doorWidth, 29));
       setRampAngle(normalizeNumber(data.rampAngle, 6.2));
       if (typeof data.themeMode === "string") setThemeMode(data.themeMode);
@@ -609,10 +796,12 @@ export default function App() {
         {
           activeMenu,
           buildingName,
-          inspectorName,
+          inspectorName: sanitizeInspectorName(inspectorName),
           inspectionDate,
           minSlopeRatio,
           minDoorWidth,
+          minDoorHeight,
+          minPathwayWidth,
           doorWidth,
           rampAngle,
           themeMode,
@@ -639,6 +828,14 @@ export default function App() {
     window.location.href = "/login.html";
   }
 
+  /**
+   * AI summary path: prefers `compiledMeasurements` when set, else `buildReportMeasurements()`.
+   * Sends `rawReport` + thresholds + latest numeric facts to `/api/ai/summary` via `generateAiSummary`.
+   * On failure, appends deterministic `summarizeReport` output with an error notice.
+   *
+   * @param {string} [rawReportOverride]
+   * @param {Array<{ id?: number, timestamp?: string, doorWidth: number, rampAngle: number, doorHeight?: number, pathwayWidth?: number }>} [measurementsOverride]
+   */
   async function generateSummary(rawReportOverride, measurementsOverride) {
     const measurements =
       measurementsOverride ||
@@ -651,6 +848,8 @@ export default function App() {
       measurements,
       minDoorWidth,
       minSlopeRatio,
+      minDoorHeight,
+      minPathwayWidth,
       verbosity: "standard"
     });
 
@@ -664,6 +863,7 @@ export default function App() {
       const latestMeasurement = measurements[0] || {};
       const latestDoorWidth = Number(latestMeasurement.doorWidth);
       const latestRampAngle = Number(latestMeasurement.rampAngle);
+      // Must match server-side interpretation of ramp rule (1:X from angle).
       const latestSlopeRatio = calculateSlopeRatio(latestRampAngle);
       const aiSummary = await generateAiSummary({
         rawReport,
@@ -671,9 +871,17 @@ export default function App() {
         verbosity: "standard",
         minDoorWidth,
         minSlopeRatio,
+        minDoorHeight,
+        minPathwayWidth,
         latestDoorWidth: Number.isFinite(latestDoorWidth) ? Number(latestDoorWidth.toFixed(2)) : null,
         latestRampAngle: Number.isFinite(latestRampAngle) ? Number(latestRampAngle.toFixed(2)) : null,
-        latestSlopeRatio: Number.isFinite(latestSlopeRatio) ? Number(latestSlopeRatio.toFixed(2)) : null
+        latestSlopeRatio: Number.isFinite(latestSlopeRatio) ? Number(latestSlopeRatio.toFixed(2)) : null,
+        latestDoorHeight: Number.isFinite(Number(latestMeasurement.doorHeight))
+          ? Number(Number(latestMeasurement.doorHeight).toFixed(2))
+          : null,
+        latestPathwayWidth: Number.isFinite(Number(latestMeasurement.pathwayWidth))
+          ? Number(Number(latestMeasurement.pathwayWidth).toFixed(2))
+          : null
       });
       setSummaryText(aiSummary);
     } catch (error) {
@@ -683,6 +891,7 @@ export default function App() {
     }
   }
 
+  /** Snapshot current merged measurements into `compiledMeasurements` and refresh `reportText`. */
   function generateReportFromLatestData() {
     const measurements = buildReportMeasurements();
     const rawReport = buildRawReport(measurements);
@@ -691,6 +900,7 @@ export default function App() {
     return { rawReport, measurements };
   }
 
+  /** CSV export uses the same `evaluateDoor` / `evaluateRamp` columns as the on-screen thresholds. */
   function exportReportCsv() {
     const measurements =
       compiledMeasurements.length > 0
@@ -704,15 +914,31 @@ export default function App() {
             }
           ];
 
-    const header = "timestamp,door_width_in,ramp_angle_deg,slope_ratio,door_status,ramp_status,overall_status";
+    const header = "timestamp,door_width_in,door_height_in,pathway_width_in,ramp_angle_deg,slope_ratio,door_status,ramp_status,door_height_status,pathway_status,overall_status";
     const rows = measurements.map((entry) => {
       const csvDoorPass = evaluateDoor(entry.doorWidth, minDoorWidth);
       const csvRampPass = evaluateRamp(entry.rampAngle, minSlopeRatio);
+      const csvDoorHeightPass = evaluateDoorHeight(entry.doorHeight, minDoorHeight);
+      const csvPathwayPass = evaluatePathwayWidth(entry.pathwayWidth, minPathwayWidth);
       const csvSlope = calculateSlopeRatio(entry.rampAngle);
-      const overall = csvDoorPass && csvRampPass ? "PASS" : "FAIL";
-      return `"${entry.timestamp}",${Number(entry.doorWidth).toFixed(2)},${Number(entry.rampAngle).toFixed(
-        2
-      )},${csvSlope.toFixed(2)},${csvDoorPass ? "PASS" : "FAIL"},${csvRampPass ? "PASS" : "FAIL"},${overall}`;
+      const overall =
+        csvDoorPass &&
+        csvRampPass &&
+        csvDoorHeightPass !== false &&
+        csvPathwayPass !== false
+          ? "PASS"
+          : "FAIL";
+      const doorHeightValue = Number(entry.doorHeight);
+      const pathwayValue = Number(entry.pathwayWidth);
+      const doorHeightLabel = Number.isFinite(doorHeightValue) ? doorHeightValue.toFixed(2) : "";
+      const pathwayLabel = Number.isFinite(pathwayValue) ? pathwayValue.toFixed(2) : "";
+      const doorHeightStatus =
+        csvDoorHeightPass === null ? "N/A" : csvDoorHeightPass ? "PASS" : "FAIL";
+      const pathwayStatus =
+        csvPathwayPass === null ? "N/A" : csvPathwayPass ? "PASS" : "FAIL";
+      return `"${entry.timestamp}",${Number(entry.doorWidth).toFixed(2)},${doorHeightLabel},${pathwayLabel},${Number(
+        entry.rampAngle
+      ).toFixed(2)},${csvSlope.toFixed(2)},${csvDoorPass ? "PASS" : "FAIL"},${csvRampPass ? "PASS" : "FAIL"},${doorHeightStatus},${pathwayStatus},${overall}`;
     });
 
     const csvContent = [header, ...rows].join("\n");
@@ -751,6 +977,10 @@ export default function App() {
         sourceType: parsed.sourceType,
         doorWidth: Number(parsed.doorWidth.toFixed(2)),
         rampAngle: Number(parsed.rampAngle.toFixed(2)),
+        doorHeight: Number.isFinite(Number(parsed.doorHeight)) ? Number(Number(parsed.doorHeight).toFixed(2)) : null,
+        pathwayWidth: Number.isFinite(Number(parsed.pathwayWidth))
+          ? Number(Number(parsed.pathwayWidth).toFixed(2))
+          : null,
         slopeRatio: Number(calculateSlopeRatio(parsed.rampAngle).toFixed(2))
       };
 
@@ -829,6 +1059,43 @@ export default function App() {
       }
 
       setWebsiteScanResult(payload);
+
+      if (authUser?.uid) {
+        try {
+          const reportText = generateWebsiteFallbackReport(payload);
+          const inspectionsRef = collection(db, "users", authUser.uid, "websiteInspections");
+          const createdDoc = await addDoc(inspectionsRef, {
+            url: payload.url || websiteUrl.trim(),
+            scannedAt: payload.scannedAt || new Date().toISOString(),
+            counts: payload.counts || {},
+            violations: Array.isArray(payload.violations) ? payload.violations : [],
+            failedChecks: Array.isArray(payload.failedChecks) ? payload.failedChecks : [],
+            passedChecks: Array.isArray(payload.passedChecks) ? payload.passedChecks : [],
+            reportText,
+            createdAt: serverTimestamp()
+          });
+
+          const createdAtLabel = new Date().toLocaleString();
+          setSavedWebsiteInspections((prev) => [
+            {
+              id: createdDoc.id,
+              url: payload.url || websiteUrl.trim(),
+              scannedAt: payload.scannedAt || new Date().toISOString(),
+              counts: payload.counts || {},
+              violations: Array.isArray(payload.violations) ? payload.violations : [],
+              failedChecks: Array.isArray(payload.failedChecks) ? payload.failedChecks : [],
+              passedChecks: Array.isArray(payload.passedChecks) ? payload.passedChecks : [],
+              reportText,
+              createdAtLabel
+            },
+            ...prev
+          ].slice(0, 200));
+          setSelectedInspectionId(createdDoc.id);
+        } catch (saveError) {
+          console.error("Unable to auto-save website inspection", saveError);
+          setWebsiteScanError("Scan completed, but auto-save failed. Check Firestore rules and connection.");
+        }
+      }
     } catch (error) {
       setWebsiteScanError(error.message || "Unable to scan website.");
     } finally {
@@ -873,11 +1140,29 @@ export default function App() {
     return <main className="auth-page">Checking session...</main>;
   }
 
+  const priorityCases = [...savedWebsiteInspections]
+    .filter((item) => (item.counts?.violations || 0) > 0)
+    .sort((a, b) => (b.counts?.violations || 0) - (a.counts?.violations || 0))
+    .slice(0, 10);
+
+  const compliantCases = [...savedWebsiteInspections]
+    .filter((item) => (item.counts?.violations || 0) === 0)
+    .sort((a, b) => (b.counts?.passes || 0) - (a.counts?.passes || 0))
+    .slice(0, 10);
+
+  const scannedCaseCount = savedWebsiteInspections.length;
+  const failedCaseCount = savedWebsiteInspections.filter((item) => (item.counts?.violations || 0) > 0).length;
+  const passedCaseCount = savedWebsiteInspections.filter((item) => (item.counts?.violations || 0) === 0).length;
+
   return (
     <div className="dashboard-shell">
       <aside className="sidebar">
         <div className="sidebar-brand">
-          <h2>ADA Vision</h2>
+          <img
+            className="sidebar-logo"
+            src={themeMode === "dark" ? "/ada-vision-logo.png" : "/ada-vision-logo-light.png"}
+            alt="ADA Vision logo"
+          />
         </div>
         <nav className="menu">
           {sidebarItems.map((item) => (
@@ -932,6 +1217,108 @@ export default function App() {
                 </button>
               </article>
             </div>
+
+            <section className="bottom-grid">
+              <article className="panel">
+                <h3>Case Summary Snapshot</h3>
+                <p>
+                  This overview highlights your website scan triage: what needs remediation first,
+                  what is already passing, and where to focus next.
+                </p>
+                <div className="row" style={{ marginBottom: "8px" }}>
+                  <span className="badge">Total scanned cases: {scannedCaseCount}</span>
+                  <span className="badge">Needs attention: {failedCaseCount}</span>
+                  <span className="badge">Compliant: {passedCaseCount}</span>
+                </div>
+                <p className="stat-meta">
+                  Prioritize remediation from the failed list. Passed list helps you demonstrate
+                  working examples during judging.
+                </p>
+                <div className="row" style={{ marginTop: "10px" }}>
+                  <button
+                    className="btn btn-outline"
+                    onClick={refreshSavedWebsiteInspections}
+                    disabled={loadingSavedInspections}
+                  >
+                    {loadingSavedInspections ? "Refreshing Cases..." : "Refresh Case Rankings"}
+                  </button>
+                </div>
+              </article>
+
+              <article className="panel">
+                <h3>Overview Narrative</h3>
+                <p>
+                  ADA Vision currently has {failedCaseCount} case{failedCaseCount === 1 ? "" : "s"} that need
+                  remediation and {passedCaseCount} compliant case{passedCaseCount === 1 ? "" : "s"}.
+                </p>
+                <p className="stat-meta">
+                  Top failed cases are sorted by highest violation count first. Top passed cases are
+                  sorted by strongest pass coverage first.
+                </p>
+              </article>
+            </section>
+
+            <section className="bottom-grid">
+              <article className="panel">
+                <h3>Top 10 Priority Cases (Needs Attention)</h3>
+                <table className="log-table">
+                  <thead>
+                    <tr>
+                      <th>Website</th>
+                      <th>Violations</th>
+                      <th>Passes</th>
+                      <th>Captured</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {priorityCases.length === 0 ? (
+                      <tr>
+                        <td colSpan="4">No failed cases yet. Great job so far.</td>
+                      </tr>
+                    ) : (
+                      priorityCases.map((item) => (
+                        <tr key={`failed-${item.id}`}>
+                          <td>{item.url}</td>
+                          <td className="bad">{item.counts?.violations || 0}</td>
+                          <td>{item.counts?.passes || 0}</td>
+                          <td>{item.createdAtLabel}</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </article>
+
+              <article className="panel">
+                <h3>Top 10 Strong Cases (Compliant)</h3>
+                <table className="log-table">
+                  <thead>
+                    <tr>
+                      <th>Website</th>
+                      <th>Passes</th>
+                      <th>Violations</th>
+                      <th>Captured</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {compliantCases.length === 0 ? (
+                      <tr>
+                        <td colSpan="4">No fully compliant cases saved yet.</td>
+                      </tr>
+                    ) : (
+                      compliantCases.map((item) => (
+                        <tr key={`pass-${item.id}`}>
+                          <td>{item.url}</td>
+                          <td className="ok">{item.counts?.passes || 0}</td>
+                          <td>{item.counts?.violations || 0}</td>
+                          <td>{item.createdAtLabel}</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </article>
+            </section>
           </section>
         )}
 
@@ -988,7 +1375,7 @@ export default function App() {
                 <textarea
                   value={importPayload}
                   onChange={(event) => setImportPayload(event.target.value)}
-                  placeholder='Example: {"ramp_slope": 1.09, "door_width": 29} or ramp_slope:1.09,door_width:29'
+                  placeholder='Example: {"ramp_slope": 1.09, "door_width": 29, "door_height": 82, "pathway_width": 40}'
                 />
               </div>
               {importError && (
@@ -1025,12 +1412,14 @@ export default function App() {
                     <th>Door</th>
                     <th>Ramp (deg)</th>
                     <th>Ramp Ratio (1:X)</th>
+                    <th>Door Height</th>
+                    <th>Pathway Width</th>
                   </tr>
                 </thead>
                 <tbody>
                   {importedReadings.length === 0 ? (
                     <tr>
-                      <td colSpan="5">No imports yet. Paste payload and click Parse & Save Reading.</td>
+                      <td colSpan="7">No imports yet. Paste payload and click Parse & Save Reading.</td>
                     </tr>
                   ) : (
                     importedReadings.slice(0, 8).map((reading) => (
@@ -1040,6 +1429,12 @@ export default function App() {
                         <td>{reading.doorWidth} in</td>
                         <td>{reading.rampAngle} deg</td>
                         <td>1:{reading.slopeRatio}</td>
+                        <td>{Number.isFinite(Number(reading.doorHeight)) ? `${reading.doorHeight} in` : "N/A"}</td>
+                        <td>
+                          {Number.isFinite(Number(reading.pathwayWidth))
+                            ? `${reading.pathwayWidth} in`
+                            : "N/A"}
+                        </td>
                       </tr>
                     ))
                   )}
@@ -1077,16 +1472,8 @@ export default function App() {
                       <input
                         type="text"
                         value={inspectorName}
-                        onChange={(event) => setInspectorName(event.target.value)}
+                        onChange={(event) => setInspectorName(sanitizeInspectorName(event.target.value))}
                         placeholder="e.g., Omar M."
-                      />
-                    </label>
-                    <label className="input-label">
-                      Inspection Date
-                      <input
-                        type="date"
-                        value={inspectionDate}
-                        onChange={(event) => setInspectionDate(event.target.value)}
                       />
                     </label>
                   </div>
@@ -1120,11 +1507,36 @@ export default function App() {
                         placeholder="32"
                       />
                     </label>
+                    <label className="input-label">
+                      Minimum Door Height (inches)
+                      <input
+                        type="number"
+                        min="1"
+                        step="0.5"
+                        value={minDoorHeight}
+                        onChange={(event) => setMinDoorHeight(Number(event.target.value))}
+                        placeholder="80"
+                      />
+                    </label>
+                    <label className="input-label">
+                      Minimum Pathway Width (inches)
+                      <input
+                        type="number"
+                        min="1"
+                        step="0.5"
+                        value={minPathwayWidth}
+                        onChange={(event) => setMinPathwayWidth(Number(event.target.value))}
+                        placeholder="36"
+                      />
+                    </label>
                   </div>
                   <p className="stat-meta">
                     Ramp acceptance: pass when ratio is <strong>1:{minSlopeRatio}</strong> or flatter
                     (higher X is flatter). Fail if steeper than that. Door acceptance: pass when width
-                    is <strong>{minDoorWidth} in</strong> or wider; fail if under that value.
+                    is <strong>{minDoorWidth} in</strong> or wider; fail if under that value. Door
+                    height acceptance: pass when height is <strong>{minDoorHeight} in</strong> or
+                    higher. Pathway acceptance: pass when clear width is{" "}
+                    <strong>{minPathwayWidth} in</strong> or wider (ADA standard 36 in).
                   </p>
                 </section>
 
