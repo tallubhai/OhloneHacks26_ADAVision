@@ -120,3 +120,14 @@ export async function generateAiWebsiteReport({
   });
   return text || "Website report unavailable.";
 }
+
+export async function generateAiWebsiteDetailedReport({
+  url,
+  checks
+}) {
+  const text = await postAiRequest("/api/ai/website-detail-report", {
+    url,
+    checks
+  });
+  return text || "Detailed AI explanation unavailable.";
+}

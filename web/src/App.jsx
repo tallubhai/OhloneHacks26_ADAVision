@@ -14,7 +14,7 @@ import {
 } from "firebase/firestore";
 import { auth, db } from "./firebase";
 import { logout } from "./auth";
-import { generateAiSummary } from "./services/aiSummary";
+import { generateAiSummary, generateAiWebsiteDetailedReport } from "./services/aiSummary";
 
 /**
  * @file App.jsx (report / threshold / sensor slice)
@@ -31,9 +31,9 @@ import { generateAiSummary } from "./services/aiSummary";
 
 const sidebarItems = [
   "Overview",
-  "Import",
-  "Reports",
+  "Buildings",
   "Websites",
+  "Reports",
   "Settings"
 ];
 
@@ -132,31 +132,65 @@ function generateRawReport({
   inspectionDate,
   notes,
   measurements,
+  selectedCases,
+  includeBuildingMeasurements,
+  includeBuildingThresholds,
   minDoorWidth,
   minSlopeRatio,
   minDoorHeight,
   minPathwayWidth
 }) {
-  const latest = measurements[0];
-  const latestDoorPass = evaluateDoor(latest.doorWidth, minDoorWidth);
-  const latestRampPass = evaluateRamp(latest.rampAngle, minSlopeRatio);
-  const latestDoorHeightPass = evaluateDoorHeight(latest.doorHeight, minDoorHeight);
-  const latestPathwayPass = evaluatePathwayWidth(latest.pathwayWidth, minPathwayWidth);
-  const latestSlope = calculateSlopeRatio(latest.rampAngle);
-  const latestDoorHeightValue = Number(latest.doorHeight);
-  const latestPathwayValue = Number(latest.pathwayWidth);
+  const latest = measurements[0] || null;
+  const latestDoorPass = latest ? evaluateDoor(latest.doorWidth, minDoorWidth) : null;
+  const latestRampPass = latest ? evaluateRamp(latest.rampAngle, minSlopeRatio) : null;
+  const latestDoorHeightPass = latest ? evaluateDoorHeight(latest.doorHeight, minDoorHeight) : null;
+  const latestPathwayPass = latest ? evaluatePathwayWidth(latest.pathwayWidth, minPathwayWidth) : null;
+  const latestSlope = latest ? calculateSlopeRatio(latest.rampAngle) : null;
+  const latestDoorHeightValue = latest ? Number(latest.doorHeight) : NaN;
+  const latestPathwayValue = latest ? Number(latest.pathwayWidth) : NaN;
   const hasDoorHeight = Number.isFinite(latestDoorHeightValue) && latestDoorHeightValue > 0;
   const hasPathwayWidth = Number.isFinite(latestPathwayValue) && latestPathwayValue > 0;
   const doorHeightStatus =
     latestDoorHeightPass === null ? "Not captured" : latestDoorHeightPass ? "Compliant" : "Non-compliant";
   const pathwayStatus =
     latestPathwayPass === null ? "Not captured" : latestPathwayPass ? "Compliant" : "Non-compliant";
-  const doorHeightLabel = hasDoorHeight
-    ? `${latestDoorHeightValue.toFixed(1)} in`
-    : "N/A";
-  const pathwayLabel = hasPathwayWidth
-    ? `${latestPathwayValue.toFixed(1)} in`
-    : "N/A";
+  const doorHeightLabel = hasDoorHeight ? `${latestDoorHeightValue.toFixed(1)} in` : "N/A";
+  const pathwayLabel = hasPathwayWidth ? `${latestPathwayValue.toFixed(1)} in` : "N/A";
+  const chosenCases = Array.isArray(selectedCases) ? selectedCases : [];
+  const includeLatestMeasurementSection = Boolean(includeBuildingMeasurements && latest);
+  const caseSection =
+    chosenCases.length === 0
+      ? "No website cases selected for this report."
+      : chosenCases
+          .map((item, index) => {
+            const topIssues = (item.failedChecks || [])
+              .slice(0, 3)
+              .map((check) => check.help)
+              .filter(Boolean)
+              .join("; ");
+            return `${index + 1}. ${item.url}
+   Captured: ${item.createdAtLabel || item.scannedAt || "Unknown time"}
+   Violations: ${item.counts?.violations || 0} | Advisory: ${item.counts?.advisory || 0} | Passes: ${item.counts?.passes || 0}
+   Top Issues: ${topIssues || "None"}`;
+          })
+          .join("\n");
+
+  const thresholdsSection = includeBuildingThresholds
+    ? `Applied ADA Thresholds:
+- Ramp ratio minimum: 1:${minSlopeRatio}
+- Door width minimum: ${minDoorWidth} in
+- Door clear height minimum: ${minDoorHeight} in
+- Pathway clear width minimum: ${minPathwayWidth} in
+`
+    : "";
+  const latestMeasurementSection = includeLatestMeasurementSection
+    ? `Latest Measurement: ${latest.timestamp || "Unknown time"}
+Ramp Ratio (run:rise): 1:${latestSlope.toFixed(2)} (${latestRampPass ? "Compliant" : "Non-compliant"}; pass if ratio is 1:${minSlopeRatio} or flatter)
+Door Width: ${Number(latest.doorWidth).toFixed(1)} in (${latestDoorPass ? "Compliant" : "Non-compliant"}; pass if width is ${minDoorWidth} in or wider)
+Door Clear Height: ${doorHeightLabel} (${doorHeightStatus}; pass if height is ${minDoorHeight} in or higher)
+Pathway Clear Width: ${pathwayLabel} (${pathwayStatus}; pass if width is ${minPathwayWidth} in or wider)
+`
+    : "";
 
   return `ADA Inspection Report
 Building: ${buildingName}
@@ -164,11 +198,12 @@ Inspector: ${inspectorName}
 Inspection Date: ${inspectionDate}
 Generated: ${new Date().toLocaleString()}
 
-Latest Measurement: ${latest.timestamp}
-Ramp Ratio (run:rise): 1:${latestSlope.toFixed(2)} (${latestRampPass ? "Compliant" : "Non-compliant"}; pass if ratio is 1:${minSlopeRatio} or flatter)
-Door Width: ${Number(latest.doorWidth).toFixed(1)} in (${latestDoorPass ? "Compliant" : "Non-compliant"}; pass if width is ${minDoorWidth} in or wider)
-Door Clear Height: ${doorHeightLabel} (${doorHeightStatus}; pass if height is ${minDoorHeight} in or higher)
-Pathway Clear Width: ${pathwayLabel} (${pathwayStatus}; pass if width is ${minPathwayWidth} in or wider)
+${thresholdsSection}
+
+${latestMeasurementSection}
+
+Selected Website Cases:
+${caseSection}
 
 Notes: ${notes}
 `;
@@ -197,6 +232,10 @@ function summarizeReport({
   minPathwayWidth,
   verbosity
 }) {
+  if (!Array.isArray(measurements) || measurements.length === 0) {
+    return "Summary:\nNo building measurements are selected in this report.";
+  }
+
   const latest = measurements[0];
   const latestDoorPass = evaluateDoor(latest.doorWidth, minDoorWidth);
   const latestRampPass = evaluateRamp(latest.rampAngle, minSlopeRatio);
@@ -382,9 +421,69 @@ function formatImpactClass(impact) {
   return "ok";
 }
 
+function formatCheckStatus(status) {
+  const normalized = String(status || "unknown").toLowerCase();
+  if (normalized === "failed_high_confidence") {
+    return { label: "FAILED", className: "bad" };
+  }
+  if (normalized === "advisory") {
+    return { label: "ADVISORY", className: "warn" };
+  }
+  if (normalized === "passed") {
+    return { label: "PASSED", className: "ok" };
+  }
+  if (normalized === "incomplete") {
+    return { label: "INCOMPLETE", className: "warn" };
+  }
+  if (normalized === "inapplicable") {
+    return { label: "N/A", className: "ok" };
+  }
+  return { label: normalized.toUpperCase(), className: "warn" };
+}
+
+function humanizeRuleId(ruleId) {
+  const text = String(ruleId || "").trim();
+  if (!text) return "Unspecified check";
+  return text
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function buildDetailedChecks(scanResult) {
+  if (!scanResult) return [];
+  const fromAllChecks = Array.isArray(scanResult.allChecks) ? scanResult.allChecks : [];
+  if (fromAllChecks.length > 0) return fromAllChecks;
+
+  const failed = (scanResult.failedChecks || []).map((item) => ({
+    ...item,
+    status: item.status || "failed_high_confidence"
+  }));
+  const advisory = (scanResult.advisoryChecks || []).map((item) => ({
+    ...item,
+    status: item.status || "advisory"
+  }));
+  const passed = (scanResult.passedChecks || []).map((item) => ({
+    ...item,
+    status: item.status || "passed"
+  }));
+  const incomplete = (scanResult.incompleteChecks || []).map((item) => ({
+    ...item,
+    status: item.status || "incomplete"
+  }));
+  const inapplicable = (scanResult.inapplicableChecks || []).map((item) => ({
+    ...item,
+    status: item.status || "inapplicable"
+  }));
+
+  return [...failed, ...advisory, ...passed, ...incomplete, ...inapplicable];
+}
+
 function generateWebsiteFallbackReport(scanResult) {
   const violations = scanResult?.violations || [];
   const counts = scanResult?.counts || {};
+  const advisoryCount = Number(counts.advisory || 0);
+  const suppressedCount = Number(counts.suppressed || 0);
   const criticalCount = violations.filter((item) => item.impact === "critical").length;
   const seriousCount = violations.filter((item) => item.impact === "serious").length;
   const topIssue = violations[0];
@@ -392,19 +491,19 @@ function generateWebsiteFallbackReport(scanResult) {
 
   if (violations.length === 0) {
     return `Executive Summary:
-This automated scan did not detect accessibility violations on this page.
+This automated scan did not detect high-confidence accessibility violations on this page.
 
 What Passed:
 The page passed ${counts.passes || 0} automated checks, indicating strong baseline support for many accessibility rules.
 
 What Failed:
-No failed checks were returned in this scan.
+No high-confidence failed checks were returned in this scan.${advisoryCount > 0 ? ` ${advisoryCount} advisory item(s) were identified for manual review.` : ""}
 
 Why It Matters:
 Passing automated checks reduces risk, but automation cannot validate every real-world user interaction.
 
 Recommended Fixes:
-Perform a quick manual keyboard and screen-reader walkthrough before final sign-off to confirm usability in practice.`;
+Perform a quick manual keyboard and screen-reader walkthrough before final sign-off to confirm usability in practice.${suppressedCount > 0 ? ` ${suppressedCount} known noisy rule(s) were downgraded to advisory to reduce false positives.` : ""}`;
   }
 
   return `Executive Summary:
@@ -472,6 +571,12 @@ function sanitizeLegacyReportText(reportText) {
   return text.replace(/\nRecent Measurements:\n[\s\S]*?\n\nNotes:/, "\nNotes:");
 }
 
+function stripBuildingMeasurementSection(reportText) {
+  const text = String(reportText || "");
+  if (!text.includes("Latest Measurement:")) return text;
+  return text.replace(/\nLatest Measurement:[\s\S]*?\n\nSelected Website Cases:/, "\n\nSelected Website Cases:");
+}
+
 function sanitizeInspectorName(value) {
   const normalized = String(value || "").trim();
   if (!normalized) return "Inspector";
@@ -511,9 +616,15 @@ export default function App() {
   const [websiteScanLoading, setWebsiteScanLoading] = useState(false);
   const [websiteScanError, setWebsiteScanError] = useState("");
   const [websiteScanResult, setWebsiteScanResult] = useState(null);
+  const [websiteScanViewTab, setWebsiteScanViewTab] = useState("summary");
+  const [websiteDetailedAiLoading, setWebsiteDetailedAiLoading] = useState(false);
+  const [websiteDetailedAiText, setWebsiteDetailedAiText] = useState("");
   const [savedWebsiteInspections, setSavedWebsiteInspections] = useState([]);
   const [selectedInspectionId, setSelectedInspectionId] = useState("");
+  const [selectedReportCaseIds, setSelectedReportCaseIds] = useState([]);
   const [loadingSavedInspections, setLoadingSavedInspections] = useState(false);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [settingsSaveMessage, setSettingsSaveMessage] = useState("");
   const [cloudStateReady, setCloudStateReady] = useState(false);
   const cloudStateLoadedRef = useRef(false);
   /** Dedupes Bluetooth ingest: same `reading.id` from `/api/sensors/latest` is applied once. */
@@ -524,7 +635,8 @@ export default function App() {
    * sorted newest-first, capped at 20; otherwise a single fallback from manual sliders.
    * @returns {Array<{ id: number, timestamp: string, doorWidth: number, rampAngle: number }>}
    */
-  function buildReportMeasurements() {
+  function buildReportMeasurements(options = {}) {
+    const includeFallback = options.includeFallback ?? true;
     const sourceMeasurements = [
       ...logs.map((entry) => ({
         id: entry.id,
@@ -555,17 +667,29 @@ export default function App() {
       pathwayWidth: null
     };
 
-    return sourceMeasurements.length > 0 ? sourceMeasurements : [fallbackMeasurement];
+    if (sourceMeasurements.length > 0) return sourceMeasurements;
+    return includeFallback ? [fallbackMeasurement] : [];
   }
 
   /** @param {Array<{ id: number, timestamp: string, doorWidth: number, rampAngle: number }>} measurements */
-  function buildRawReport(measurements) {
+  function buildRawReport(measurements, options = {}) {
+    const selectedCases = savedWebsiteInspections.filter((item) =>
+      selectedReportCaseIds.includes(item.id)
+    );
+    const includeBuildingMeasurements = options.includeBuildingMeasurements ?? (measurements.length > 0);
+    const includeBuildingThresholds =
+      options.includeBuildingThresholds ??
+      includeBuildingMeasurements;
+
     return generateRawReport({
       buildingName,
       inspectorName,
       inspectionDate,
       notes: reportNotes,
       measurements,
+      selectedCases,
+      includeBuildingMeasurements,
+      includeBuildingThresholds,
       minDoorWidth,
       minSlopeRatio,
       minDoorHeight,
@@ -731,6 +855,11 @@ export default function App() {
     selectedInspectionId
   ]);
 
+  useEffect(() => {
+    if (!settingsSaveMessage) return;
+    setSettingsSaveMessage("");
+  }, [buildingName, inspectorName, minSlopeRatio, minDoorWidth, minDoorHeight, minPathwayWidth, themeMode]);
+
   function normalizeNumber(value, fallbackValue) {
     const numeric = Number(value);
     return Number.isFinite(numeric) ? numeric : fallbackValue;
@@ -745,7 +874,9 @@ export default function App() {
       }
 
       const data = snapshot.data() || {};
-      if (typeof data.activeMenu === "string") setActiveMenu(data.activeMenu);
+      if (typeof data.activeMenu === "string") {
+        setActiveMenu(data.activeMenu === "Import" ? "Buildings" : data.activeMenu);
+      }
       if (typeof data.buildingName === "string") setBuildingName(data.buildingName);
       if (typeof data.inspectorName === "string") {
         setInspectorName(sanitizeInspectorName(data.inspectorName));
@@ -788,7 +919,7 @@ export default function App() {
   }
 
   async function persistDashboardState() {
-    if (!authUser?.uid || !cloudStateLoadedRef.current) return;
+    if (!authUser?.uid || !cloudStateLoadedRef.current) return false;
     try {
       const stateRef = doc(db, "users", authUser.uid, "dashboardState", "current");
       await setDoc(
@@ -818,9 +949,27 @@ export default function App() {
         },
         { merge: true }
       );
+      return true;
     } catch (error) {
       console.error("Unable to save dashboard state to Firestore", error);
+      return false;
     }
+  }
+
+  async function handleSaveSettings() {
+    if (!authUser?.uid) {
+      setSettingsSaveMessage("Sign in required before saving settings.");
+      return;
+    }
+    setSavingSettings(true);
+    setSettingsSaveMessage("");
+    const ok = await persistDashboardState();
+    setSavingSettings(false);
+    if (ok) {
+      setSettingsSaveMessage("Settings saved.");
+      return;
+    }
+    setSettingsSaveMessage("Unable to save settings. Check Firestore rules/connection.");
   }
 
   async function handleLogout() {
@@ -893,11 +1042,38 @@ export default function App() {
 
   /** Snapshot current merged measurements into `compiledMeasurements` and refresh `reportText`. */
   function generateReportFromLatestData() {
-    const measurements = buildReportMeasurements();
-    const rawReport = buildRawReport(measurements);
+    // Keep building/hardware data independent from website case selection.
+    // When website cases are selected, generate website-only report content.
+    const includeBuildingMeasurements = selectedReportCaseIds.length === 0;
+    const measurements = includeBuildingMeasurements
+      ? buildReportMeasurements({ includeFallback: false })
+      : [];
+    const rawReport = buildRawReport(measurements, {
+      includeBuildingMeasurements,
+      includeBuildingThresholds: includeBuildingMeasurements && (logs.length > 0 || importedReadings.length > 0)
+    });
     setCompiledMeasurements(measurements);
     setReportText(rawReport);
     return { rawReport, measurements };
+  }
+
+  async function generateAiSummaryFromCurrentReport() {
+    const { rawReport, measurements } = generateReportFromLatestData();
+    await generateSummary(rawReport, measurements);
+  }
+
+  function toggleReportCaseSelection(caseId) {
+    setSelectedReportCaseIds((prev) =>
+      prev.includes(caseId) ? prev.filter((id) => id !== caseId) : [...prev, caseId]
+    );
+  }
+
+  function selectAllReportCases() {
+    setSelectedReportCaseIds(savedWebsiteInspections.map((item) => item.id));
+  }
+
+  function clearAllReportCases() {
+    setSelectedReportCaseIds([]);
   }
 
   /** CSV export uses the same `evaluateDoor` / `evaluateRamp` columns as the on-screen thresholds. */
@@ -1013,6 +1189,7 @@ export default function App() {
   async function scanWebsiteAccessibility() {
     setWebsiteScanError("");
     setWebsiteScanResult(null);
+    setWebsiteDetailedAiText("");
 
     if (!websiteUrl.trim()) {
       setWebsiteScanError("Please enter a website URL.");
@@ -1070,7 +1247,11 @@ export default function App() {
             counts: payload.counts || {},
             violations: Array.isArray(payload.violations) ? payload.violations : [],
             failedChecks: Array.isArray(payload.failedChecks) ? payload.failedChecks : [],
+            advisoryChecks: Array.isArray(payload.advisoryChecks) ? payload.advisoryChecks : [],
             passedChecks: Array.isArray(payload.passedChecks) ? payload.passedChecks : [],
+            incompleteChecks: Array.isArray(payload.incompleteChecks) ? payload.incompleteChecks : [],
+            inapplicableChecks: Array.isArray(payload.inapplicableChecks) ? payload.inapplicableChecks : [],
+            allChecks: Array.isArray(payload.allChecks) ? payload.allChecks : [],
             reportText,
             createdAt: serverTimestamp()
           });
@@ -1084,12 +1265,18 @@ export default function App() {
               counts: payload.counts || {},
               violations: Array.isArray(payload.violations) ? payload.violations : [],
               failedChecks: Array.isArray(payload.failedChecks) ? payload.failedChecks : [],
+              advisoryChecks: Array.isArray(payload.advisoryChecks) ? payload.advisoryChecks : [],
               passedChecks: Array.isArray(payload.passedChecks) ? payload.passedChecks : [],
+              incompleteChecks: Array.isArray(payload.incompleteChecks) ? payload.incompleteChecks : [],
+              inapplicableChecks: Array.isArray(payload.inapplicableChecks) ? payload.inapplicableChecks : [],
+              allChecks: Array.isArray(payload.allChecks) ? payload.allChecks : [],
               reportText,
               createdAtLabel
             },
             ...prev
           ].slice(0, 200));
+          // Keep case selection fully manual from the Reports panel.
+          // Scanning a website should save the case, but not auto-select it for report generation.
           setSelectedInspectionId(createdDoc.id);
         } catch (saveError) {
           console.error("Unable to auto-save website inspection", saveError);
@@ -1100,6 +1287,33 @@ export default function App() {
       setWebsiteScanError(error.message || "Unable to scan website.");
     } finally {
       setWebsiteScanLoading(false);
+    }
+  }
+
+  async function generateDetailedWebsiteAiExplanation() {
+    if (!websiteScanResult) {
+      setWebsiteScanError("Run a website scan first.");
+      return;
+    }
+
+    const checks = buildDetailedChecks(websiteScanResult);
+    if (checks.length === 0) {
+      setWebsiteScanError("No detailed checks available for AI explanation.");
+      return;
+    }
+
+    try {
+      setWebsiteDetailedAiLoading(true);
+      setWebsiteScanError("");
+      const text = await generateAiWebsiteDetailedReport({
+        url: websiteScanResult.url || websiteUrl,
+        checks
+      });
+      setWebsiteDetailedAiText(text);
+    } catch (error) {
+      setWebsiteScanError(error.message || "Unable to generate detailed AI explanation.");
+    } finally {
+      setWebsiteDetailedAiLoading(false);
     }
   }
 
@@ -1124,6 +1338,12 @@ export default function App() {
         };
       });
       setSavedWebsiteInspections(records);
+      setSelectedReportCaseIds((prev) => {
+        const available = new Set(records.map((item) => item.id));
+        // Keep only user-selected IDs that still exist.
+        // Do not auto-select all cases by default.
+        return prev.filter((id) => available.has(id));
+      });
       if (records.length === 0) {
         setSelectedInspectionId("");
       } else if (!selectedInspectionId || !records.some((item) => item.id === selectedInspectionId)) {
@@ -1140,19 +1360,72 @@ export default function App() {
     return <main className="auth-page">Checking session...</main>;
   }
 
-  const priorityCases = [...savedWebsiteInspections]
-    .filter((item) => (item.counts?.violations || 0) > 0)
-    .sort((a, b) => (b.counts?.violations || 0) - (a.counts?.violations || 0))
-    .slice(0, 10);
+  function classifyWebsiteRisk(item) {
+    const counts = item?.counts || {};
+    const violations = Number(counts.violations || 0);
+    const advisory = Number(counts.advisory || 0);
+    const failedChecks = Array.isArray(item?.failedChecks) ? item.failedChecks : [];
+    const hasCritical = failedChecks.some(
+      (check) => String(check?.impact || "").toLowerCase() === "critical"
+    );
+    const seriousCount = failedChecks.filter(
+      (check) => String(check?.impact || "").toLowerCase() === "serious"
+    ).length;
 
-  const compliantCases = [...savedWebsiteInspections]
-    .filter((item) => (item.counts?.violations || 0) === 0)
-    .sort((a, b) => (b.counts?.passes || 0) - (a.counts?.passes || 0))
-    .slice(0, 10);
+    if (hasCritical || violations >= 8 || seriousCount >= 2) return "high";
+    if (violations >= 3 || seriousCount >= 1 || advisory >= 6) return "moderate";
+    return "low";
+  }
 
   const scannedCaseCount = savedWebsiteInspections.length;
-  const failedCaseCount = savedWebsiteInspections.filter((item) => (item.counts?.violations || 0) > 0).length;
-  const passedCaseCount = savedWebsiteInspections.filter((item) => (item.counts?.violations || 0) === 0).length;
+  const lowRiskCases = savedWebsiteInspections
+    .filter((item) => classifyWebsiteRisk(item) === "low")
+    .sort((a, b) => (a.counts?.violations || 0) - (b.counts?.violations || 0));
+  const moderateRiskCases = savedWebsiteInspections
+    .filter((item) => classifyWebsiteRisk(item) === "moderate")
+    .sort((a, b) => (b.counts?.violations || 0) - (a.counts?.violations || 0));
+  const highRiskCases = savedWebsiteInspections
+    .filter((item) => classifyWebsiteRisk(item) === "high")
+    .sort((a, b) => (b.counts?.violations || 0) - (a.counts?.violations || 0));
+
+  function classifyBuildingRisk(measurement) {
+    const doorPass = evaluateDoor(measurement?.doorWidth, minDoorWidth);
+    const rampPass = evaluateRamp(measurement?.rampAngle, minSlopeRatio);
+    const doorHeightPass = evaluateDoorHeight(measurement?.doorHeight, minDoorHeight);
+    const pathwayPass = evaluatePathwayWidth(measurement?.pathwayWidth, minPathwayWidth);
+    const slopeRatio = calculateSlopeRatio(measurement?.rampAngle);
+    const failCount = [doorPass === false, rampPass === false, doorHeightPass === false, pathwayPass === false]
+      .filter(Boolean).length;
+
+    if (failCount === 0) return "low";
+
+    const severeSlope = Number.isFinite(slopeRatio) && slopeRatio < minSlopeRatio * 0.75;
+    const severeDoor = Number(measurement?.doorWidth) < minDoorWidth - 2;
+    const severeDoorHeight = doorHeightPass === false && Number(measurement?.doorHeight) < minDoorHeight - 2;
+    const severePathway = pathwayPass === false && Number(measurement?.pathwayWidth) < minPathwayWidth - 2;
+    if (failCount >= 2 || severeSlope || severeDoor || severeDoorHeight || severePathway) return "high";
+
+    return "moderate";
+  }
+
+  const buildingMeasurementsForOverview = [...logs, ...importedReadings]
+    .map((entry) => ({
+      id: entry.id,
+      timestamp: entry.timestamp || "Unknown time",
+      doorWidth: Number(entry.doorWidth),
+      rampAngle: Number(entry.rampAngle),
+      doorHeight: Number.isFinite(Number(entry.doorHeight)) ? Number(entry.doorHeight) : null,
+      pathwayWidth: Number.isFinite(Number(entry.pathwayWidth)) ? Number(entry.pathwayWidth) : null
+    }))
+    .filter((entry) => Number.isFinite(entry.doorWidth) && Number.isFinite(entry.rampAngle))
+    .sort((a, b) => Number(b.id) - Number(a.id))
+    .slice(0, 30);
+  const lowRiskBuildingCases = buildingMeasurementsForOverview
+    .filter((entry) => classifyBuildingRisk(entry) === "low");
+  const moderateRiskBuildingCases = buildingMeasurementsForOverview
+    .filter((entry) => classifyBuildingRisk(entry) === "moderate");
+  const highRiskBuildingCases = buildingMeasurementsForOverview
+    .filter((entry) => classifyBuildingRisk(entry) === "high");
 
   return (
     <div className="dashboard-shell">
@@ -1204,7 +1477,7 @@ export default function App() {
               <article className="home-card">
                 <h4>Ramp and Door Check</h4>
                 <p>Import sensor readings, review live measurements, and generate the ADA report.</p>
-                <button className="btn btn-primary" onClick={() => setActiveMenu("Import")}>
+                <button className="btn btn-primary" onClick={() => setActiveMenu("Buildings")}>
                   Open Ramp and Door
                 </button>
               </article>
@@ -1227,12 +1500,13 @@ export default function App() {
                 </p>
                 <div className="row" style={{ marginBottom: "8px" }}>
                   <span className="badge">Total scanned cases: {scannedCaseCount}</span>
-                  <span className="badge">Needs attention: {failedCaseCount}</span>
-                  <span className="badge">Compliant: {passedCaseCount}</span>
+                  <span className="badge">High risk: {highRiskCases.length}</span>
+                  <span className="badge">Moderate risk: {moderateRiskCases.length}</span>
+                  <span className="badge">Low risk: {lowRiskCases.length}</span>
                 </div>
                 <p className="stat-meta">
-                  Prioritize remediation from the failed list. Passed list helps you demonstrate
-                  working examples during judging.
+                  Risk levels use both volume and severity. A case with fewer issues can still be
+                  high risk when critical findings are present.
                 </p>
                 <div className="row" style={{ marginTop: "10px" }}>
                   <button
@@ -1248,38 +1522,42 @@ export default function App() {
               <article className="panel">
                 <h3>Overview Narrative</h3>
                 <p>
-                  ADA Vision currently has {failedCaseCount} case{failedCaseCount === 1 ? "" : "s"} that need
-                  remediation and {passedCaseCount} compliant case{passedCaseCount === 1 ? "" : "s"}.
+                  ADA Vision currently has {highRiskCases.length} high-risk case
+                  {highRiskCases.length === 1 ? "" : "s"}, {moderateRiskCases.length} moderate-risk
+                  case{moderateRiskCases.length === 1 ? "" : "s"}, and {lowRiskCases.length} low-risk
+                  case{lowRiskCases.length === 1 ? "" : "s"}.
                 </p>
                 <p className="stat-meta">
-                  Top failed cases are sorted by highest violation count first. Top passed cases are
-                  sorted by strongest pass coverage first.
+                  High risk includes critical findings or high violation volume. Moderate risk
+                  indicates notable issues. Low risk has smaller issue counts and no major severity.
                 </p>
               </article>
             </section>
 
-            <section className="bottom-grid">
+            <section className="settings-grid">
               <article className="panel">
-                <h3>Top 10 Priority Cases (Needs Attention)</h3>
+                <h3>High Risk Cases</h3>
                 <table className="log-table">
                   <thead>
                     <tr>
                       <th>Website</th>
                       <th>Violations</th>
+                      <th>Advisory</th>
                       <th>Passes</th>
                       <th>Captured</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {priorityCases.length === 0 ? (
+                    {highRiskCases.length === 0 ? (
                       <tr>
-                        <td colSpan="4">No failed cases yet. Great job so far.</td>
+                        <td colSpan="5">No high-risk cases right now.</td>
                       </tr>
                     ) : (
-                      priorityCases.map((item) => (
+                      highRiskCases.map((item) => (
                         <tr key={`failed-${item.id}`}>
                           <td>{item.url}</td>
                           <td className="bad">{item.counts?.violations || 0}</td>
+                          <td>{item.counts?.advisory || 0}</td>
                           <td>{item.counts?.passes || 0}</td>
                           <td>{item.createdAtLabel}</td>
                         </tr>
@@ -1290,28 +1568,195 @@ export default function App() {
               </article>
 
               <article className="panel">
-                <h3>Top 10 Strong Cases (Compliant)</h3>
+                <h3>Moderate Risk Cases</h3>
                 <table className="log-table">
                   <thead>
                     <tr>
                       <th>Website</th>
-                      <th>Passes</th>
                       <th>Violations</th>
+                      <th>Advisory</th>
+                      <th>Passes</th>
                       <th>Captured</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {compliantCases.length === 0 ? (
+                    {moderateRiskCases.length === 0 ? (
                       <tr>
-                        <td colSpan="4">No fully compliant cases saved yet.</td>
+                        <td colSpan="5">No moderate-risk cases right now.</td>
                       </tr>
                     ) : (
-                      compliantCases.map((item) => (
-                        <tr key={`pass-${item.id}`}>
+                      moderateRiskCases.map((item) => (
+                        <tr key={`moderate-${item.id}`}>
                           <td>{item.url}</td>
-                          <td className="ok">{item.counts?.passes || 0}</td>
                           <td>{item.counts?.violations || 0}</td>
+                          <td className="warn">{item.counts?.advisory || 0}</td>
+                          <td>{item.counts?.passes || 0}</td>
                           <td>{item.createdAtLabel}</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </article>
+
+              <article className="panel">
+                <h3>Low Risk Cases</h3>
+                <table className="log-table">
+                  <thead>
+                    <tr>
+                      <th>Website</th>
+                      <th>Violations</th>
+                      <th>Advisory</th>
+                      <th>Passes</th>
+                      <th>Captured</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {lowRiskCases.length === 0 ? (
+                      <tr>
+                        <td colSpan="5">No low-risk cases yet.</td>
+                      </tr>
+                    ) : (
+                      lowRiskCases.map((item) => (
+                        <tr key={`low-${item.id}`}>
+                          <td>{item.url}</td>
+                          <td>{item.counts?.violations || 0}</td>
+                          <td>{item.counts?.advisory || 0}</td>
+                          <td className="ok">{item.counts?.passes || 0}</td>
+                          <td>{item.createdAtLabel}</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </article>
+            </section>
+
+            <section className="bottom-grid" style={{ marginTop: "10px" }}>
+              <article className="panel">
+                <h3>Building Risk Snapshot</h3>
+                <p>
+                  Physical checks are also triaged by risk from your imported/logged building measurements.
+                </p>
+                <div className="row" style={{ marginBottom: "8px" }}>
+                  <span className="badge">Building checks: {buildingMeasurementsForOverview.length}</span>
+                  <span className="badge">High risk: {highRiskBuildingCases.length}</span>
+                  <span className="badge">Moderate risk: {moderateRiskBuildingCases.length}</span>
+                  <span className="badge">Low risk: {lowRiskBuildingCases.length}</span>
+                </div>
+                <p className="stat-meta">
+                  High risk means multiple failed thresholds or severe misses. Moderate risk means one
+                  failed threshold. Low risk means all captured thresholds pass.
+                </p>
+              </article>
+            </section>
+
+            <section className="settings-grid">
+              <article className="panel">
+                <h3>High Risk Building Cases</h3>
+                <table className="log-table">
+                  <thead>
+                    <tr>
+                      <th>Timestamp</th>
+                      <th>Door (in)</th>
+                      <th>Ramp (1:X)</th>
+                      <th>Door Height</th>
+                      <th>Pathway</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {highRiskBuildingCases.length === 0 ? (
+                      <tr>
+                        <td colSpan="5">No high-risk building cases right now.</td>
+                      </tr>
+                    ) : (
+                      highRiskBuildingCases.slice(0, 10).map((item) => (
+                        <tr key={`building-high-${item.id}`}>
+                          <td>{item.timestamp}</td>
+                          <td className={evaluateDoor(item.doorWidth, minDoorWidth) ? "ok" : "bad"}>
+                            {item.doorWidth.toFixed(1)}
+                          </td>
+                          <td className={evaluateRamp(item.rampAngle, minSlopeRatio) ? "ok" : "bad"}>
+                            {calculateSlopeRatio(item.rampAngle).toFixed(2)}
+                          </td>
+                          <td className={evaluateDoorHeight(item.doorHeight, minDoorHeight) === false ? "bad" : ""}>
+                            {Number.isFinite(item.doorHeight) ? `${item.doorHeight.toFixed(1)} in` : "N/A"}
+                          </td>
+                          <td className={evaluatePathwayWidth(item.pathwayWidth, minPathwayWidth) === false ? "bad" : ""}>
+                            {Number.isFinite(item.pathwayWidth) ? `${item.pathwayWidth.toFixed(1)} in` : "N/A"}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </article>
+
+              <article className="panel">
+                <h3>Moderate Risk Building Cases</h3>
+                <table className="log-table">
+                  <thead>
+                    <tr>
+                      <th>Timestamp</th>
+                      <th>Door (in)</th>
+                      <th>Ramp (1:X)</th>
+                      <th>Door Height</th>
+                      <th>Pathway</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {moderateRiskBuildingCases.length === 0 ? (
+                      <tr>
+                        <td colSpan="5">No moderate-risk building cases right now.</td>
+                      </tr>
+                    ) : (
+                      moderateRiskBuildingCases.slice(0, 10).map((item) => (
+                        <tr key={`building-moderate-${item.id}`}>
+                          <td>{item.timestamp}</td>
+                          <td className={evaluateDoor(item.doorWidth, minDoorWidth) ? "ok" : "warn"}>
+                            {item.doorWidth.toFixed(1)}
+                          </td>
+                          <td className={evaluateRamp(item.rampAngle, minSlopeRatio) ? "ok" : "warn"}>
+                            {calculateSlopeRatio(item.rampAngle).toFixed(2)}
+                          </td>
+                          <td className={evaluateDoorHeight(item.doorHeight, minDoorHeight) === false ? "warn" : ""}>
+                            {Number.isFinite(item.doorHeight) ? `${item.doorHeight.toFixed(1)} in` : "N/A"}
+                          </td>
+                          <td className={evaluatePathwayWidth(item.pathwayWidth, minPathwayWidth) === false ? "warn" : ""}>
+                            {Number.isFinite(item.pathwayWidth) ? `${item.pathwayWidth.toFixed(1)} in` : "N/A"}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </article>
+
+              <article className="panel">
+                <h3>Low Risk Building Cases</h3>
+                <table className="log-table">
+                  <thead>
+                    <tr>
+                      <th>Timestamp</th>
+                      <th>Door (in)</th>
+                      <th>Ramp (1:X)</th>
+                      <th>Door Height</th>
+                      <th>Pathway</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {lowRiskBuildingCases.length === 0 ? (
+                      <tr>
+                        <td colSpan="5">No low-risk building cases yet.</td>
+                      </tr>
+                    ) : (
+                      lowRiskBuildingCases.slice(0, 10).map((item) => (
+                        <tr key={`building-low-${item.id}`}>
+                          <td>{item.timestamp}</td>
+                          <td className="ok">{item.doorWidth.toFixed(1)}</td>
+                          <td className="ok">{calculateSlopeRatio(item.rampAngle).toFixed(2)}</td>
+                          <td>{Number.isFinite(item.doorHeight) ? `${item.doorHeight.toFixed(1)} in` : "N/A"}</td>
+                          <td>{Number.isFinite(item.pathwayWidth) ? `${item.pathwayWidth.toFixed(1)} in` : "N/A"}</td>
                         </tr>
                       ))
                     )}
@@ -1323,50 +1768,89 @@ export default function App() {
         )}
 
         {activeMenu === "Reports" && (
-          <section className="bottom-grid" style={{ marginTop: "14px" }}>
+          <section style={{ marginTop: "14px" }}>
             <article className="panel">
-              <h3>Inspection Report</h3>
+              <h3>Reports</h3>
               <p>
-                This report auto-builds from the latest imported/saved measurements. You do not
-                need to manually enter values here.
+                Choose which website cases to include, then generate a detailed inspection report
+                and optional AI summary.
               </p>
-              <div className="summary-box">
-                {sanitizeLegacyReportText(reportText) || "Import data to generate report."}
-              </div>
+
+              <details className="settings-section case-picker" style={{ marginTop: "8px" }} open>
+                <summary className="case-picker-summary">
+                  Case Selection (Select All That Apply)
+                  <span className="badge">
+                    {selectedReportCaseIds.length} / {savedWebsiteInspections.length} selected
+                  </span>
+                </summary>
+                <div className="case-picker-body">
+                  <div className="row" style={{ marginBottom: "8px" }}>
+                    <button className="btn btn-outline" onClick={selectAllReportCases}>
+                      Select All
+                    </button>
+                    <button className="btn btn-outline" onClick={clearAllReportCases}>
+                      Clear All
+                    </button>
+                  </div>
+                  <div className="case-picker-list">
+                    {savedWebsiteInspections.length === 0 ? (
+                      <p className="stat-meta">No saved website cases yet. Run scans first.</p>
+                    ) : (
+                      savedWebsiteInspections.map((item) => (
+                        <label key={`report-case-${item.id}`} className="report-case-option">
+                          <input
+                            type="checkbox"
+                            checked={selectedReportCaseIds.includes(item.id)}
+                            onChange={() => toggleReportCaseSelection(item.id)}
+                          />
+                          <span>
+                            {item.url} ({item.counts?.violations || 0} violations, {item.counts?.passes || 0} passes)
+                          </span>
+                        </label>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </details>
+
               <div className="row" style={{ marginTop: "10px" }}>
-                <button className="btn btn-outline" onClick={generateReportFromLatestData}>
+                <button className="btn btn-primary" onClick={generateReportFromLatestData}>
                   Generate Report
+                </button>
+                <button
+                  className="btn btn-primary"
+                  onClick={generateAiSummaryFromCurrentReport}
+                  disabled={summaryLoading}
+                >
+                  {summaryLoading ? "Generating AI Summary..." : "Generate AI Summary"}
+                </button>
+                <button className="btn btn-outline" onClick={exportReportPdf}>
+                  Download PDF
                 </button>
                 <button className="btn btn-outline" onClick={exportReportCsv}>
                   Export CSV
                 </button>
-                <button className="btn btn-outline" onClick={exportReportPdf}>
-                  Export PDF
-                </button>
               </div>
-            </article>
 
-            <article className="panel">
-              <h3>AI Summary</h3>
-              <p>Readable explanation generated from the latest report data.</p>
-              <div className="summary-box">{summaryText}</div>
-              <div className="row" style={{ marginTop: "10px" }}>
-                <button
-                  className="btn btn-primary"
-                  onClick={() => generateSummary()}
-                  disabled={summaryLoading}
-                >
-                  {summaryLoading ? "Generating..." : "Regenerate AI Summary"}
-                </button>
+              <h4 style={{ marginTop: "14px", marginBottom: "8px" }}>Generated Report</h4>
+              <div className="summary-box">
+                {(selectedReportCaseIds.length > 0
+                  ? stripBuildingMeasurementSection(sanitizeLegacyReportText(reportText))
+                  : sanitizeLegacyReportText(reportText)) || "Click Generate Report to build a detailed report."}
+              </div>
+
+              <h4 style={{ marginTop: "14px", marginBottom: "8px" }}>AI Summary</h4>
+              <div className="summary-box">
+                {summaryText || "Click Generate AI Summary after creating a report."}
               </div>
             </article>
           </section>
         )}
 
-        {activeMenu === "Import" && (
+        {activeMenu === "Buildings" && (
           <section style={{ marginTop: "14px" }}>
             <article className="panel">
-              <h3>Import</h3>
+              <h3>Buildings</h3>
               <p>
                 Receive raw Bluetooth payloads (JSON/CSV), validate values, and store imported
                 readings for this session.
@@ -1554,6 +2038,12 @@ export default function App() {
                   </div>
                 </section>
               </div>
+              <div className="row" style={{ marginTop: "12px" }}>
+                <button className="btn btn-primary" onClick={handleSaveSettings} disabled={savingSettings}>
+                  {savingSettings ? "Saving Settings..." : "Save Settings"}
+                </button>
+                {settingsSaveMessage ? <span className="stat-meta">{settingsSaveMessage}</span> : null}
+              </div>
             </article>
           </section>
         )}
@@ -1578,6 +2068,20 @@ export default function App() {
                   {websiteScanLoading ? "Scanning..." : "Scan Website"}
                 </button>
               </div>
+              <div className="row" style={{ marginTop: "10px" }}>
+                <button
+                  className={`btn ${websiteScanViewTab === "summary" ? "btn-primary" : "btn-outline"}`}
+                  onClick={() => setWebsiteScanViewTab("summary")}
+                >
+                  Summary
+                </button>
+                <button
+                  className={`btn ${websiteScanViewTab === "detail" ? "btn-primary" : "btn-outline"}`}
+                  onClick={() => setWebsiteScanViewTab("detail")}
+                >
+                  Detail Scan
+                </button>
+              </div>
               {websiteScanError && (
                 <p className="status-error" style={{ marginTop: "10px" }}>
                   {websiteScanError}
@@ -1588,43 +2092,129 @@ export default function App() {
                   <div className="row" style={{ marginTop: "10px" }}>
                     <span className="badge">Violations: {websiteScanResult.counts?.violations ?? 0}</span>
                     <span className="badge">Passes: {websiteScanResult.counts?.passes ?? 0}</span>
+                    <span className="badge">Advisory: {websiteScanResult.counts?.advisory ?? 0}</span>
+                    <span className="badge">Incomplete: {websiteScanResult.counts?.incomplete ?? 0}</span>
+                    <span className="badge">Inapplicable: {websiteScanResult.counts?.inapplicable ?? 0}</span>
                   </div>
-                  <div className="website-report-grid" style={{ marginTop: "10px" }}>
-                    {parseWebsiteReportSections(generateWebsiteFallbackReport(websiteScanResult)).map((section) => (
-                      <article key={section.title} className="report-card">
-                        <h4>{section.title}</h4>
-                        <p>{section.content}</p>
-                      </article>
-                    ))}
-                  </div>
-                  {(websiteScanResult.failedChecks || []).length > 0 &&
-                    (websiteScanResult.passedChecks || []).length > 0 && (
-                      <div className="website-checks-grid" style={{ marginTop: "10px" }}>
-                        <article className="panel">
-                          <h3>Top Failed Checks</h3>
-                          <ul className="checks-list">
-                            {websiteScanResult.failedChecks.slice(0, 5).map((item) => (
-                              <li key={`fail-${item.id}`}>
-                                <span className={`metric-result ${formatImpactClass(item.impact)}`}>
-                                  {String(item.impact || "unknown").toUpperCase()}
-                                </span>{" "}
-                                {item.help}
-                              </li>
-                            ))}
-                          </ul>
-                        </article>
-                        <article className="panel">
-                          <h3>Top Passed Checks</h3>
-                          <ul className="checks-list">
-                            {websiteScanResult.passedChecks.slice(0, 5).map((item) => (
-                              <li key={`pass-${item.id}`}>
-                                <span className="metric-result ok">PASSED</span> {item.help}
-                              </li>
-                            ))}
-                          </ul>
-                        </article>
+                  <p className="stat-meta" style={{ marginTop: "8px" }}>
+                    Pass/fail uses high-confidence WCAG A/AA issues. Advisory findings are informational.
+                  </p>
+
+                  {websiteScanViewTab === "summary" && (
+                    <>
+                      <div className="website-report-grid" style={{ marginTop: "10px" }}>
+                        {parseWebsiteReportSections(generateWebsiteFallbackReport(websiteScanResult)).map((section) => (
+                          <article key={section.title} className="report-card">
+                            <h4>{section.title}</h4>
+                            <p>{section.content}</p>
+                          </article>
+                        ))}
                       </div>
-                    )}
+                      {(websiteScanResult.failedChecks || []).length > 0 &&
+                        (websiteScanResult.passedChecks || []).length > 0 && (
+                          <div className="website-checks-grid" style={{ marginTop: "10px" }}>
+                            <article className="panel">
+                              <h3>Top Failed Checks</h3>
+                              <ul className="checks-list">
+                                {websiteScanResult.failedChecks.slice(0, 5).map((item) => (
+                                  <li key={`fail-${item.id}`}>
+                                    <span className={`metric-result ${formatImpactClass(item.impact)}`}>
+                                      {String(item.impact || "unknown").toUpperCase()}
+                                    </span>{" "}
+                                    {item.help}
+                                  </li>
+                                ))}
+                              </ul>
+                            </article>
+                            <article className="panel">
+                              <h3>Top Passed Checks</h3>
+                              <ul className="checks-list">
+                                {websiteScanResult.passedChecks.slice(0, 5).map((item) => (
+                                  <li key={`pass-${item.id}`}>
+                                    <span className="metric-result ok">PASSED</span> {item.help}
+                                  </li>
+                                ))}
+                              </ul>
+                            </article>
+                          </div>
+                        )}
+                    </>
+                  )}
+
+                  {websiteScanViewTab === "detail" && (
+                    <div style={{ marginTop: "10px" }}>
+                      {(() => {
+                        const detailChecks = buildDetailedChecks(websiteScanResult);
+                        return (
+                          <>
+                      <article className="panel">
+                        <h3>Detailed Scan - Every Test</h3>
+                        <p>
+                          Total tests in this scan:{" "}
+                          <strong>{detailChecks.length}</strong>
+                        </p>
+                        <table className="log-table">
+                          <thead>
+                            <tr>
+                              <th>Accessibility Check</th>
+                              <th>Status</th>
+                              <th>Impact</th>
+                              <th>Affected</th>
+                              <th>Technical Rule ID</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {detailChecks.length === 0 ? (
+                              <tr>
+                                <td colSpan="5">No detailed checks returned.</td>
+                              </tr>
+                            ) : (
+                              detailChecks.map((item) => {
+                                const statusUi = formatCheckStatus(item.status);
+                                return (
+                                  <tr key={`${item.status}-${item.id}-${item.help}`}>
+                                    <td>{humanizeRuleId(item.id)}</td>
+                                    <td>
+                                      <span className={`metric-result ${statusUi.className}`}>
+                                        {statusUi.label}
+                                      </span>
+                                    </td>
+                                    <td>{String(item.impact || "none").toUpperCase()}</td>
+                                    <td>{item.affectedElements ?? 0}</td>
+                                    <td>{item.id}</td>
+                                  </tr>
+                                );
+                              })
+                            )}
+                          </tbody>
+                        </table>
+                      </article>
+
+                      <article className="panel" style={{ marginTop: "10px" }}>
+                        <h3>AI Detailed Explanation (All Tests)</h3>
+                        <p>
+                          Generates one explanation line for each test from this scan.
+                        </p>
+                        <div className="row" style={{ marginBottom: "10px" }}>
+                          <button
+                            className="btn btn-primary"
+                            onClick={generateDetailedWebsiteAiExplanation}
+                            disabled={websiteDetailedAiLoading}
+                          >
+                            {websiteDetailedAiLoading
+                              ? "Generating Detailed AI Explanation..."
+                              : "Generate AI Explanation for All Tests"}
+                          </button>
+                        </div>
+                        <div className="summary-box">
+                          {websiteDetailedAiText || "No AI detailed explanation generated yet."}
+                        </div>
+                      </article>
+                          </>
+                        );
+                      })()}
+                    </div>
+                  )}
                 </>
               )}
             </article>
