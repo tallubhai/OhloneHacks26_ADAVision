@@ -91,12 +91,8 @@ void loop() {
     for (int i = 0; i < 15; i++) {
       dist = distance.readDistance();
       total += dist;
-<<<<<<< HEAD
        //bt.send(String(dist, 2)); //debug line
        delay(200);
-=======
-      delay(200);
->>>>>>> 4ac21282349a9a67297ceb92f7f72fa1e6e86f28
     }
     digitalWrite(greenLED, LOW);
     float avgDist = total / 15;
@@ -135,12 +131,8 @@ void loop() {
     for (int i = 0; i < 15; i++) {
       dist = distance.readDistance();
       total += dist;
-<<<<<<< HEAD
        //bt.send(String(dist, 2)); //debug line
        delay(200);
-=======
-      delay(200);
->>>>>>> 4ac21282349a9a67297ceb92f7f72fa1e6e86f28
     }
     digitalWrite(greenLED, LOW);
     float avgDist = total / 15;
