@@ -27,6 +27,31 @@ const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
 const ollamaModel = process.env.OLLAMA_MODEL || "qwen2.5:0.5b";
 /** @type {object | null} Last successful {@link POST /api/sensors/ingest} payload (in-memory). */
 let latestSensorReading = null;
+const HIGH_CONFIDENCE_IMPACTS = new Set(["serious", "critical"]);
+const SUPPRESSED_RULE_IDS = new Set([
+  "color-contrast",
+  "landmark-one-main",
+  "aria-required-children"
+]);
+
+/**
+ * Stable key for comparing rule presence across repeated scans.
+ * @param {import("axe-core").Result} rule
+ * @returns {string}
+ */
+function ruleStabilityKey(rule) {
+  const impact = String(rule?.impact || "none").toLowerCase();
+  return `${String(rule?.id || "").toLowerCase()}::${impact}`;
+}
+
+/**
+ * Suppress known noisy rules in demo mode so pass/fail focuses on high-confidence blockers.
+ * @param {import("axe-core").Result} rule
+ * @returns {boolean}
+ */
+function isSuppressedRule(rule) {
+  return SUPPRESSED_RULE_IDS.has(String(rule?.id || "").toLowerCase());
+}
 
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
@@ -65,6 +90,32 @@ function normalizeRuleResult(rule) {
     helpUrl: rule.helpUrl,
     affectedElements: Array.isArray(rule.nodes) ? rule.nodes.length : 0
   };
+}
+
+/**
+ * Flatten grouped check buckets into a single list with status labels.
+ * @param {object} args
+ * @param {Array<object>} args.failedChecks
+ * @param {Array<object>} args.advisoryChecks
+ * @param {Array<object>} args.passedChecks
+ * @param {Array<object>} args.incompleteChecks
+ * @param {Array<object>} args.inapplicableChecks
+ * @returns {Array<object>}
+ */
+function buildAllChecks({
+  failedChecks,
+  advisoryChecks,
+  passedChecks,
+  incompleteChecks,
+  inapplicableChecks
+}) {
+  return [
+    ...failedChecks.map((item) => ({ ...item, status: "failed_high_confidence" })),
+    ...advisoryChecks.map((item) => ({ ...item, status: "advisory" })),
+    ...passedChecks.map((item) => ({ ...item, status: "passed" })),
+    ...incompleteChecks.map((item) => ({ ...item, status: "incomplete" })),
+    ...inapplicableChecks.map((item) => ({ ...item, status: "inapplicable" }))
+  ];
 }
 
 app.get("/api/health", (_req, res) => {
@@ -263,6 +314,68 @@ Violations: ${JSON.stringify(Array.isArray(violations) ? violations.slice(0, 15)
   }
 });
 
+/** Generate per-check explanations for detailed scan mode. */
+app.post("/api/ai/website-detail-report", async (req, res) => {
+  const { url, checks = [] } = req.body ?? {};
+  if (!url || typeof url !== "string") {
+    return res.status(400).json({ error: "url is required." });
+  }
+  if (!Array.isArray(checks) || checks.length === 0) {
+    return res.status(400).json({ error: "checks array is required." });
+  }
+
+  const sanitizedChecks = checks
+    .map((item) => ({
+      id: String(item?.id || ""),
+      status: String(item?.status || "unknown"),
+      impact: String(item?.impact || "none"),
+      help: String(item?.help || ""),
+      description: String(item?.description || ""),
+      affectedElements: Number(item?.affectedElements || 0)
+    }))
+    .filter((item) => item.id);
+
+  if (sanitizedChecks.length === 0) {
+    return res.status(400).json({ error: "checks array has no valid entries." });
+  }
+
+  const chunkSize = 35;
+  const chunks = [];
+  for (let i = 0; i < sanitizedChecks.length; i += chunkSize) {
+    chunks.push(sanitizedChecks.slice(i, i + chunkSize));
+  }
+
+  try {
+    const sections = [];
+    for (let index = 0; index < chunks.length; index += 1) {
+      const chunk = chunks[index];
+      const prompt = `You are an accessibility QA analyst.
+Explain EACH check in the list with one short practical sentence.
+Output format MUST be exactly one line per check:
+<id> | <status> | <impact> | <explanation sentence>
+Do not skip any checks. Keep same check order.
+No markdown, no bullets, no numbering.
+
+Website: ${url}
+Chunk: ${index + 1} of ${chunks.length}
+Checks:
+${JSON.stringify(chunk)}`;
+
+      const text = await runOllamaPrompt(prompt);
+      sections.push(text || "");
+    }
+
+    return res.json({
+      text: sections.join("\n").trim() || "Detailed AI explanation unavailable."
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: "Failed to generate detailed AI website report.",
+      details: error.message
+    });
+  }
+});
+
 /**
  * Ingest one reading from the Python Bluetooth bridge. Validates ranges to match bridge rules.
  * Updates in-memory `latestSensorReading` for {@link GET /api/sensors/latest}.
@@ -343,25 +456,94 @@ app.post("/api/websites/scan", async (req, res) => {
     });
 
     await page.addScriptTag({ path: axeScriptPath });
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+
     const axeResults = await page.evaluate(async () => {
-      return window.axe.run(document);
+      const options = {
+        runOnly: {
+          type: "tag",
+          values: ["wcag2a", "wcag2aa"]
+        },
+        resultTypes: ["violations", "passes", "incomplete", "inapplicable"]
+      };
+
+      const first = await window.axe.run(document, options);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const second = await window.axe.run(document, options);
+      return { first, second };
     });
-    const violations = axeResults.violations.map(normalizeViolation);
-    const failedChecks = axeResults.violations.map(normalizeRuleResult);
-    const passedChecks = axeResults.passes.map(normalizeRuleResult);
+
+    const firstViolations = axeResults.first.violations || [];
+    const secondViolationKeys = new Set(
+      (axeResults.second.violations || []).map((rule) => ruleStabilityKey(rule))
+    );
+
+    const stableViolationsRaw = firstViolations.filter((rule) =>
+      secondViolationKeys.has(ruleStabilityKey(rule))
+    );
+    const unstableViolationsRaw = firstViolations.filter(
+      (rule) => !secondViolationKeys.has(ruleStabilityKey(rule))
+    );
+
+    const suppressedViolationsRaw = stableViolationsRaw.filter((rule) => isSuppressedRule(rule));
+    const unsuppressedViolationsRaw = stableViolationsRaw.filter((rule) => !isSuppressedRule(rule));
+    const highConfidenceViolationsRaw = unsuppressedViolationsRaw.filter((rule) =>
+      HIGH_CONFIDENCE_IMPACTS.has(String(rule.impact || "").toLowerCase())
+    );
+    const advisoryViolationsRaw = unsuppressedViolationsRaw.filter(
+      (rule) => !HIGH_CONFIDENCE_IMPACTS.has(String(rule.impact || "").toLowerCase())
+    );
+
+    const violations = highConfidenceViolationsRaw.map(normalizeViolation);
+    const advisoryViolations = [
+      ...advisoryViolationsRaw,
+      ...suppressedViolationsRaw,
+      ...unstableViolationsRaw
+    ].map(normalizeViolation);
+    const failedChecks = highConfidenceViolationsRaw.map(normalizeRuleResult);
+    const advisoryChecks = [
+      ...advisoryViolationsRaw,
+      ...suppressedViolationsRaw,
+      ...unstableViolationsRaw
+    ].map(normalizeRuleResult);
+    const suppressedChecks = suppressedViolationsRaw.map(normalizeRuleResult);
+    const passedChecks = axeResults.first.passes.map(normalizeRuleResult);
+    const incompleteChecks = (axeResults.first.incomplete || []).map(normalizeRuleResult);
+    const inapplicableChecks = (axeResults.first.inapplicable || []).map(normalizeRuleResult);
+    const allChecks = buildAllChecks({
+      failedChecks,
+      advisoryChecks,
+      passedChecks,
+      incompleteChecks,
+      inapplicableChecks
+    });
 
     return res.json({
       url: targetUrl,
       scannedAt: new Date().toISOString(),
+      scoring: {
+        mode: "high-confidence",
+        details:
+          "Only stable unsuppressed serious/critical WCAG 2 A/AA issues are counted as violations. Noisy or unstable findings are advisory."
+      },
       counts: {
-        violations: axeResults.violations.length,
-        passes: axeResults.passes.length,
-        incomplete: axeResults.incomplete.length,
-        inapplicable: axeResults.inapplicable.length
+        violations: highConfidenceViolationsRaw.length,
+        advisory: advisoryViolationsRaw.length + suppressedViolationsRaw.length + unstableViolationsRaw.length,
+        suppressed: suppressedViolationsRaw.length,
+        unstable: unstableViolationsRaw.length,
+        passes: axeResults.first.passes.length,
+        incomplete: axeResults.first.incomplete.length,
+        inapplicable: axeResults.first.inapplicable.length
       },
       failedChecks,
+      advisoryChecks,
+      suppressedChecks,
       passedChecks,
-      violations
+      incompleteChecks,
+      inapplicableChecks,
+      allChecks,
+      violations,
+      advisoryViolations
     });
   } catch (error) {
     return res.status(500).json({

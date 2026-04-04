@@ -20,8 +20,19 @@ service cloud.firestore {
 
     function validCountsMap(counts) {
       return counts is map
-        && counts.keys().hasOnly(["violations", "passes", "incomplete", "inapplicable"])
+        && counts.keys().hasOnly([
+          "violations",
+          "advisory",
+          "suppressed",
+          "unstable",
+          "passes",
+          "incomplete",
+          "inapplicable"
+        ])
         && (!("violations" in counts) || isNonNegativeNumber(counts.violations))
+        && (!("advisory" in counts) || isNonNegativeNumber(counts.advisory))
+        && (!("suppressed" in counts) || isNonNegativeNumber(counts.suppressed))
+        && (!("unstable" in counts) || isNonNegativeNumber(counts.unstable))
         && (!("passes" in counts) || isNonNegativeNumber(counts.passes))
         && (!("incomplete" in counts) || isNonNegativeNumber(counts.incomplete))
         && (!("inapplicable" in counts) || isNonNegativeNumber(counts.inapplicable));
@@ -34,7 +45,11 @@ service cloud.firestore {
           "counts",
           "violations",
           "failedChecks",
+          "advisoryChecks",
           "passedChecks",
+          "incompleteChecks",
+          "inapplicableChecks",
+          "allChecks",
           "reportText",
           "createdAt"
         ])
@@ -47,10 +62,18 @@ service cloud.firestore {
         && validCountsMap(data.counts)
         && data.violations is list
         && data.failedChecks is list
+        && data.advisoryChecks is list
         && data.passedChecks is list
+        && data.incompleteChecks is list
+        && data.inapplicableChecks is list
+        && data.allChecks is list
         && data.violations.size() <= 300
         && data.failedChecks.size() <= 300
+        && data.advisoryChecks.size() <= 300
         && data.passedChecks.size() <= 300
+        && data.incompleteChecks.size() <= 300
+        && data.inapplicableChecks.size() <= 300
+        && data.allChecks.size() <= 1200
         && data.reportText is string
         && data.reportText.size() <= 12000
         && data.createdAt is timestamp;
@@ -64,7 +87,11 @@ service cloud.firestore {
           "counts",
           "violations",
           "failedChecks",
+          "advisoryChecks",
           "passedChecks",
+          "incompleteChecks",
+          "inapplicableChecks",
+          "allChecks",
           "reportText"
         ])
         && (!("url" in changed) || (request.resource.data.url is string
@@ -78,8 +105,16 @@ service cloud.firestore {
           && request.resource.data.violations.size() <= 300))
         && (!("failedChecks" in changed) || (request.resource.data.failedChecks is list
           && request.resource.data.failedChecks.size() <= 300))
+        && (!("advisoryChecks" in changed) || (request.resource.data.advisoryChecks is list
+          && request.resource.data.advisoryChecks.size() <= 300))
         && (!("passedChecks" in changed) || (request.resource.data.passedChecks is list
           && request.resource.data.passedChecks.size() <= 300))
+        && (!("incompleteChecks" in changed) || (request.resource.data.incompleteChecks is list
+          && request.resource.data.incompleteChecks.size() <= 300))
+        && (!("inapplicableChecks" in changed) || (request.resource.data.inapplicableChecks is list
+          && request.resource.data.inapplicableChecks.size() <= 300))
+        && (!("allChecks" in changed) || (request.resource.data.allChecks is list
+          && request.resource.data.allChecks.size() <= 1200))
         && (!("reportText" in changed) || (request.resource.data.reportText is string
           && request.resource.data.reportText.size() <= 12000));
     }

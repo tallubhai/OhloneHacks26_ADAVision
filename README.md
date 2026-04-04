@@ -57,14 +57,14 @@ python pyBridge/bluetooth_to_localhost.py --baud 9600 --bt-filter "HC-05"
 Install and start Ollama, then pull a lightweight model:
 
 ```bash
-ollama pull llama3.2:3b
+ollama pull qwen2.5:0.5b
 ```
 
 Optional environment overrides in `web/.env.local`:
 
 ```bash
 OLLAMA_BASE_URL=http://127.0.0.1:11434
-OLLAMA_MODEL=llama3.2:3b
+OLLAMA_MODEL=qwen2.5:0.5b
 ```
 
 If Ollama is unavailable, the app falls back to local non-AI summary logic.

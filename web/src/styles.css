@@ -540,6 +540,55 @@ a:hover {
   gap: 6px;
 }
 
+.case-picker {
+  padding: 0;
+  overflow: hidden;
+}
+
+.case-picker-summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-weight: 600;
+}
+
+.case-picker-summary::-webkit-details-marker {
+  display: none;
+}
+
+.case-picker-body {
+  padding: 0 12px 12px;
+}
+
+.case-picker-list {
+  max-height: 230px;
+  overflow-y: auto;
+  border: 1px solid #e4ebfb;
+  border-radius: 10px;
+  background: #fff;
+  padding: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.report-case-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  background: #f8faff;
+}
+
+.report-case-option input {
+  width: 16px;
+  height: 16px;
+}
+
 
 .website-report-grid {
   display: grid;
@@ -680,6 +729,15 @@ body.theme-dark .report-card p {
 
 body.theme-dark .settings-section h4 {
   color: #d5e2ff;
+}
+
+body.theme-dark .case-picker-list {
+  background: #131c2d;
+  border-color: #334260;
+}
+
+body.theme-dark .report-case-option {
+  background: #1a2740;
 }
 
 body.theme-dark .home-card {
