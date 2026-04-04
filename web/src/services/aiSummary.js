@@ -1,53 +1,43 @@
-export async function generateOpenAiSummary({
+async function postAiRequest(path, body) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const details = payload?.details ? ` ${payload.details}` : "";
+    throw new Error(`${payload?.error || "AI request failed."}${details}`);
+  }
+
+  return String(payload?.text || "").trim();
+}
+
+export async function generateAiSummary({
   rawReport,
   buildingName,
   verbosity = "standard"
 }) {
-  const apiKey = import.meta.env.VITE_OPENAI_API_KEY;
-  const model = import.meta.env.VITE_OPENAI_MODEL || "gpt-4.1-mini";
-
-  if (!apiKey) {
-    throw new Error("Missing VITE_OPENAI_API_KEY in .env.local");
-  }
-
-  const verbosityGuide =
-    verbosity === "concise"
-      ? "Use 2 short sentences."
-      : verbosity === "detailed"
-        ? "Use 4-6 sentences with clear recommendations."
-        : "Use 3-4 sentences in plain English.";
-
-  const prompt = `You are an ADA compliance assistant.
-Summarize the inspection report into plain English.
-${verbosityGuide}
-Mention pass/fail status for ramp and door, and next action if non-compliant.
-Building: ${buildingName}
-
-Report:
-${rawReport}`;
-
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      model,
-      input: prompt
-    })
+  const text = await postAiRequest("/api/ai/summary", {
+    rawReport,
+    buildingName,
+    verbosity
   });
+  return `Summary:\n${text || "Summary unavailable."}`;
+}
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`OpenAI request failed: ${response.status} ${errorText}`);
-  }
-
-  const data = await response.json();
-  const text =
-    data.output_text ||
-    data.output?.[0]?.content?.[0]?.text ||
-    "Summary unavailable.";
-
-  return `Summary:\n${text.trim()}`;
+export async function generateAiWebsiteReport({
+  url,
+  violations,
+  counts
+}) {
+  const text = await postAiRequest("/api/ai/website-report", {
+    url,
+    counts,
+    violations
+  });
+  return text || "Website report unavailable.";
 }
