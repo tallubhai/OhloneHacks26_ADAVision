@@ -13,8 +13,6 @@ void setup() {
   imu.begin();
   distance.begin();
   bt.begin(9600);
-
-  bt.send("System Initialized");
 }
 
 void loop() {
@@ -23,10 +21,9 @@ void loop() {
 
   float dist = distance.readDistance();
 
-  String output = "AngleFromLevel: " + String(angleFromLevel, 2) +
-                  " | Distance: " + String(dist, 2) + " cm";
+  String output = "*" + String(angleFromLevel, 2) + "|" + String(dist, 2);
 
   bt.send(output);
 
-  delay(200);
+  delay(250);
 }
